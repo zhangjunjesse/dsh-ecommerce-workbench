@@ -21,6 +21,9 @@ const { createLocalProvider } = require("../lib/provider.js");
 /** Smallest valid PNG, as a browser would hand it over. */
 const PNG_DATA_URL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+// `PNG_BYTES` (the same PNG decoded) is declared further down with the
+// importFolder fixtures; provider stubs only read it at call time, so the
+// single declaration there serves both.
 
 /** Minimal req/res doubles: enough surface for the handler under test. */
 function makeReq(method, url, body) {
@@ -303,6 +306,14 @@ function flakyProvider(delayMs, failOnCall) {
       await sleep();
       if (mine === failOnCall) throw new Error("simulated stall/failure on call " + mine);
       return [{ buffer: input.buffer, mimeType: input.mimeType }];
+    },
+    async generate(input) {
+      calls += 1;
+      const mine = calls;
+      await sleep();
+      if (mine === failOnCall) throw new Error("simulated stall/failure on call " + mine);
+      const first = (Array.isArray(input.images) && input.images[0]) || { buffer: PNG_BYTES, mimeType: "image/png" };
+      return [{ buffer: first.buffer, mimeType: first.mimeType }];
     }
   };
 }
@@ -760,4 +771,100 @@ test("GET /ecom/api/jobs lists the jobs still running on the host", async () => 
   assert.equal(res.status, 200);
   assert.equal(res.json.ok, true);
   assert.ok(Array.isArray(res.json.jobs));
+});
+
+// ---------- 通用工作台: free-form prompt + optional reference images --------
+
+/** Start a generate job and wait for it to settle; returns the settled job. */
+async function generateJob(handler, payload) {
+  const started = await call(handler, "POST", "/ecom/api/generate", payload);
+  assert.equal(started.status, 200);
+  assert.ok(started.json.jobId, "generate returns a jobId immediately");
+  return waitJob(handler, started.json.jobId);
+}
+
+test("generate produces the requested number of outputs from reference images", async () => {
+  const { handler } = await freshHandler();
+
+  const job = await generateJob(handler, {
+    images: [{ dataUrl: PNG_DATA_URL }, { dataUrl: PNG_DATA_URL }],
+    prompt: "把这两张图合成一张海报",
+    count: 3
+  });
+  assert.equal(job.status, "done");
+  assert.equal(job.row.prints.length, 3);
+  assert.equal(job.row.prompt, "把这两张图合成一张海报");
+  assert.equal(job.row.sourceFiles.length, 2, "both reference images are kept with the row");
+
+  const state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.generations.length, 1);
+
+  const file = await call(handler, "GET", "/ecom/api/file/" + job.row.prints[0].file);
+  assert.equal(file.status, 200);
+  assert.ok(Buffer.isBuffer(file.res.body), "outputs are real stored files");
+});
+
+test("generate works with no reference images (text-to-image)", async () => {
+  const { handler } = await freshHandler();
+  const job = await generateJob(handler, { prompt: "一只戴帽子的猫", count: 1 });
+  assert.equal(job.status, "done");
+  assert.equal(job.row.prints.length, 1);
+  assert.deepEqual(job.row.sourceFiles, [], "no references stored when none were sent");
+});
+
+test("generate requires a prompt", async () => {
+  const { handler } = await freshHandler();
+  const blank = await call(handler, "POST", "/ecom/api/generate", { images: [{ dataUrl: PNG_DATA_URL }] });
+  assert.equal(blank.status, 400);
+  const whitespace = await call(handler, "POST", "/ecom/api/generate", { prompt: "   " });
+  assert.equal(whitespace.status, 400);
+});
+
+test("deleting a generate output drops its row once empty, taking references with it", async () => {
+  const { handler, store } = await freshHandler();
+  const job = await generateJob(handler, {
+    images: [{ dataUrl: PNG_DATA_URL }],
+    prompt: "变体",
+    count: 2
+  });
+  const row = job.row;
+  assert.equal((await readdir(store.filesDir)).length, 3, "1 reference + 2 outputs");
+
+  await call(handler, "POST", "/ecom/api/delete", { kind: "generationVariant", id: row.id, printId: row.prints[0].id });
+  let state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.generations[0].prints.length, 1);
+  assert.equal((await readdir(store.filesDir)).length, 2, "one output gone, reference still held by the row");
+
+  await call(handler, "POST", "/ecom/api/delete", { kind: "generationVariant", id: row.id, printId: row.prints[1].id });
+  state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.generations.length, 0, "row disappears with its last output");
+  assert.equal((await readdir(store.filesDir)).length, 0, "its reference images go with it");
+});
+
+test("deleting a whole generate row, and clearing, remove records and files", async () => {
+  const { handler, store } = await freshHandler();
+  const a = await generateJob(handler, { images: [{ dataUrl: PNG_DATA_URL }], prompt: "a", count: 1 });
+  await generateJob(handler, { images: [{ dataUrl: PNG_DATA_URL }], prompt: "b", count: 1 });
+  assert.equal((await readdir(store.filesDir)).length, 4, "two rows x (1 reference + 1 output)");
+
+  await call(handler, "POST", "/ecom/api/delete", { kind: "generation", id: a.row.id });
+  let state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.generations.length, 1);
+  assert.equal((await readdir(store.filesDir)).length, 2);
+
+  await call(handler, "POST", "/ecom/api/clear", { kind: "generations" });
+  state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.generations.length, 0);
+  assert.equal((await readdir(store.filesDir)).length, 0);
+});
+
+test("generate keeps successful outputs even when one fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ecom-store-"));
+  // The 2nd generate call of the batch fails; the rest still land.
+  const handler = createHandler(createStore(root), flakyProvider(10, 2));
+  const job = await generateJob(handler, { prompt: "x", count: 3 });
+
+  assert.equal(job.status, "done", "batch still succeeds despite one failure");
+  assert.equal(job.row.prints.length, 2, "the two successful outputs are kept");
+  assert.ok(job.error && /1 张生成失败/.test(job.error), "failure surfaced as a warning: " + job.error);
 });

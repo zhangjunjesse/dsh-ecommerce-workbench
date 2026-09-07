@@ -2,10 +2,11 @@
 
 A DSH plugin that renders a local e-commerce design workbench as the profile's
 primary UI, so opening DSH lands on the workbench. Ships **印花管理** (印花提取 +
-印花二创, real generation), **T恤二创** (apply a print onto a T恤, real
-generation), and **T恤管理** (upload and manage multiple reference photos per
-T恤, no generation — this one is secondary housekeeping, so it sits in its own
-de-emphasized nav group below a divider).
+印花二创, real generation) and **T恤二创** (apply a print onto a T恤, real
+generation) as the print pipeline; below a divider sit the non-pipeline items:
+**通用工作台** (free-form prompt + reference images → outputs, the daily driver),
+**T恤管理** (upload and manage multiple reference photos per T恤, no generation)
+and **提示词管理** (saved prompts, pickable from every composer).
 
 The workbench is backed by a real Host API that persists to disk: images are
 uploaded, stored as files, and their metadata is kept in `state.json`. Image
@@ -19,11 +20,13 @@ key is unavailable, the workbench **falls back to a no-network passthrough**
 
 Two flows under the「印花管理」module:
 
-- **印花提取** — paste/upload one or more images plus a prompt, submit, and each
-  source image becomes one extracted print (edit mode: isolate the pattern,
-  drop the background). Results land directly in the 印花原图库 (the results
-  feed), newest first, each row keeping the source thumbnail + prompt so a print
-  stays traceable. Per-item remove and a clear-all action are on the toolbar.
+- **印花提取** — paste/upload one or more images plus a prompt, submit, and
+  **one submission = one task = one extracted print**: every uploaded image is
+  passed to the service together as references and combined into a single output
+  (edit mode: isolate the pattern, drop the background). Results land directly in
+  the 印花原图库 (the results feed), newest first, each row keeping the source
+  thumbnail + prompt so a print stays traceable. Per-item remove and a clear-all
+  action are on the toolbar.
 - **印花二创** — pick **one** print from the 原图库 **or paste/upload a print image
   straight into the composer** as the source, enter a prompt, choose a style and
   the number of outputs (1 / 2 / 4 / 6); one feed row is created with that many
@@ -117,11 +120,27 @@ the workbench **re-adopts** them on remount, and every finished result is alread
 persisted to the store — so an in-progress task reappears and keeps going rather
 than being lost.
 
+## 通用工作台
+
+The free-form daily driver, below the divider with the other non-pipeline
+items. Paste or upload **any number of reference images**, write **any prompt**,
+pick how many outputs (1 / 2 / 4), and generate. Unlike the print flows nothing
+is prepended to the prompt and the references carry no fixed roles — the prompt
+drives everything, so it can say "combine these two" or "use the second image's
+palette". Reference images are optional: with none it is plain text-to-image.
+
+Each submission becomes one feed row (references → outputs) with a copyable
+prompt; outputs and whole rows can be removed, and a row's reference images are
+cleaned up when its last output goes. Host endpoint: `POST /ecom/api/generate`
+(same non-blocking job shape as the other flows), plus `/ecom/api/delete` as
+`kind: "generation"` / `"generationVariant"` and `/ecom/api/clear` as
+`kind: "generations"`.
+
 ## 提示词管理
 
-A second-tier nav item (below T恤管理) manages saved common prompts: create
-(name + text), edit, copy, delete, clear-all — persisted in the store like the
-rest of the data. Every composer (印花提取 / 印花二创 / T恤二创) has a small
+A second-tier nav item manages saved common prompts: create (name + text),
+edit, copy, delete, clear-all — persisted in the store like the rest of the
+data. Every composer (印花提取 / 印花二创 / T恤二创 / 通用工作台) has a small
 bookmark button that opens a picker of these prompts; picking one fills the
 prompt box. Host endpoints: `POST /ecom/api/prompt` (upsert), plus
 `/ecom/api/delete` as `kind: "prompt"` and `/ecom/api/clear` as
@@ -210,7 +229,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 ## Verify
 
 - Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/provider.js`
-- Tests: `node --test test/host-api.test.js` (32/32 pass, incl. timing-based
+- Tests: `node --test test/host-api.test.js` (41/41 pass, incl. timing-based
   concurrency proofs, partial-failure proofs — one flaky item still leaves
   the rest of the batch intact — using provider stubs, T恤 create/add-images/
   delete/clear lifecycle, T恤二创 single-pair/cross-product/photo-choice/
