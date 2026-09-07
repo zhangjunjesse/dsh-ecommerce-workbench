@@ -1,0 +1,22 @@
+# Dependencies (this package is installed into a DSH profile via a file: link)
+node_modules/
+
+# Local debug artifacts, not source
+dump-config.txt
+ecom-probe.js
+ecom-e2e.js
+ecom-jobflow.js
+ecom-baseurl.js
+ecom-q.js
+probe.js
+
+# Never commit API keys
+.toapis_key
+*.key
+.env
+.env.*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
