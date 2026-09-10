@@ -131,7 +131,13 @@ palette". Reference images are optional: with none it is plain text-to-image.
 
 Each submission becomes one feed row (references → outputs) with a copyable
 prompt; outputs and whole rows can be removed, and a row's reference images are
-cleaned up when its last output goes. Host endpoint: `POST /ecom/api/generate`
+cleaned up when its last output goes. Every row also has a **复用** button that
+refills the composer from that history row — the prompt goes back into the
+input box and the row's reference images are fetched from the host and turned
+back into pending paste thumbnails (equivalent to hand-pasted ones), so a past
+task can be tweaked and resubmitted in one click. If a row's source files were
+already cleaned up on the host, the missing thumbs are dropped with a
+non-blocking warning instead of loading forever. Host endpoint: `POST /ecom/api/generate`
 (same non-blocking job shape as the other flows), plus `/ecom/api/delete` as
 `kind: "generation"` / `"generationVariant"` and `/ecom/api/clear` as
 `kind: "generations"`.
@@ -205,7 +211,7 @@ selection click.
 
 ## Wiring
 
-The package is installed in the web profile as a `file:` link, so its
+The package is installed in the web profile as a `file:` dependency, so its
 `dsh.bundle.patch` auto-overlays the Cordis config. The client half registers the
 workbench as **one view in the conversation view ring** (`conversation.view`,
 id `ecom-workbench`) — additive, so the native Chat view and the always-present
@@ -213,6 +219,34 @@ composer stay usable. Click the「电商工作台」tab to show the workbench.
 
 The client talks to the host over the loopback-fenced `/ecom/api` endpoint using
 `fetch`. Only same-machine browsers (`127.0.0.1`/`localhost`) are accepted.
+
+### Deploying an edit: `file:` is a COPY, not a live link
+
+The web profile sets `nodeLinker: hoisted` (`~/.dsh/profiles/web/pnpm-workspace.yaml`),
+so pnpm **copies this package's files into
+`~/.dsh/profiles/web/node_modules/dsh-ecommerce-workbench-mock`** instead of
+symlinking the source directory. Editing files here therefore changes **nothing**
+that DSH loads until the copy is refreshed — and restarting `dsh web` just
+re-serves the same stale copy, which looks exactly like "my change didn't work".
+
+Worse, a plain re-`add` is a **no-op**: the lockfile records this dependency as
+`resolution: {directory: …, type: directory}` with **no version and no integrity
+hash**, so pnpm considers it already satisfied and skips the re-copy. Bumping
+`version` in `package.json` does not help either.
+
+The only reliable refresh is **remove, then add** (both are the sanctioned
+`dsh plugin` entry points — never run npm/pnpm directly under `~/.dsh/profiles/`):
+
+```sh
+dsh plugin --profile web remove dsh-ecommerce-workbench-mock
+dsh plugin --profile web add file:E:/dsh-workspace/space-1/dsh-ecommerce-workbench
+```
+
+Then confirm the copy actually moved before restarting anything — compare the
+installed file against the source, e.g. check that a symbol you just added is
+present in
+`~/.dsh/profiles/web/node_modules/dsh-ecommerce-workbench-mock/lib/client.js`.
+Finally restart `dsh web` and hard-refresh (Ctrl+Shift+R).
 
 ## Real provider prerequisites
 
