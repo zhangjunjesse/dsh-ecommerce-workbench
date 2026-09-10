@@ -10,7 +10,7 @@ Status: current
 
 将 Mock 电商工作台打包为可安装的 Web Profile 插件（`dsh-ecommerce-workbench-mock`），借助 bundle patch（`cordis.patch.yml`）自动挂载。客户端把工作台注册为**对话视图环里的一个标签**（`conversation.view`，id `ecom-workbench`），与原生对话（Chat + 底部输入框）**共存而非整屏接管**。
 
-工作台由**真实的 Host API 支撑并持久化**：客户端通过 `fetch` 调 `/ecom/api`（state / extract / recreate / delete / clear / file），Host 半把图片存成文件、把元数据写入 `state.json`（位于 `$DSH_HOME/ecommerce-workbench`）。图片生成为真实调用：`createToapisProvider()` 复用 `toapis-gpt-image-2` 技能的 `scripts/generate.py`（edit 模式）上传参考图 → 建任务 → 轮询 → 下载，接入的是 ToAPIs `gpt-image-2` 服务；当技能脚本或 API Key 不可用时回退到 `createLocalProvider()`（无网络透传），工作台因此始终可用。
+工作台由**真实的 Host API 支撑并持久化**：客户端通过 `fetch` 调 `/ecom/api` 下的 JSON 接口（当前接口清单以 `lib/index.js` 与 README 为准，此处不复制），Host 半把图片存成文件、把元数据写入 `state.json`（位于 `$DSH_HOME/ecommerce-workbench`）。图片生成为真实调用：`createToapisProvider()` 复用 `toapis-gpt-image-2` 技能的 `scripts/generate.py`（edit 模式）上传参考图 → 建任务 → 轮询 → 下载，接入的是 ToAPIs `gpt-image-2` 服务；当技能脚本或 API Key 不可用时回退到 `createLocalProvider()`（无网络透传），工作台因此始终可用。
 
 第 1 阶段（当前已实现）只做「印花管理」：
 
@@ -22,7 +22,11 @@ Status: current
 - T恤二创：**T恤和印花都支持多选**（`tshirtIds[]` x `printIds[]`），多选时是**笛卡尔积**——每件选中的T恤都跟每张选中的印花配对生成一次（例如 2 件T恤 x 3 张印花 = 6 次生成），每一对是结果区里独立的一行，每对固定生成 1 张合成图（不再有单独的输出数量选择器，v0.9.3 已去掉；v0.9.4 把单选改成多选+笛卡尔积）。T恤有多张照片时可以逐件选择这次配对用哪一张。Provider 用 edit 模式传两张参考图（T恤照片在先、印花在后），让模型保留T恤的版型/面料/光影，把印花贴合上去。与「印花二创」共用同一套非阻塞 job + 实时进度 + 部分失败容错的实现，只是 `job.total`/`job.done` 统计的是配对数而不是变体数，`job.rows`（不再是单个 `job.row`）收集每一对生成完的行，某一对失败/卡住不影响其余已生成的行。**印花来源是「印花二创」的结果（二创印花），不是印花原图库**：`/ecom/api/tshirtRecreate` 的 `printIds` 在 `state.recreations` 里查找（原先误查 `state.library`，v0.9.2 修正），客户端选择器传入的是 `recreations` 的展平列表，而不是 `library`。
 - T恤管理定位为「T恤二创」的输入准备，不是重点模块：左侧导航把「印花提取／印花二创／T恤二创」放在主分组，「T恤管理」单独放在分割线下方的次要分组（字号更小、颜色更淡）。
 
-其余模块（工作台首页 / 场景图管理 / 模特管理 / 产品管理）不在当前阶段范围，后续版本开放。
+第 3 阶段新增「场景图管理」（纯存储，不生成）：
+
+- 场景图管理：一个**扁平场景图池**，没有提示词、没有选择器、也不生成——粘贴（Ctrl+V）、拖入、或「上传图片」后**立即入库**（无待上传区、无提交按钮），因为这里要的是把参考场景存下来，而不是组织一次生成任务。展示用**瀑布流**（`column-width: 220px`）：场景图各种比例都有，每张保持自身高度而不是被裁成方块；滚动容器与多列盒子刻意分成两层元素——给 `column-width` 一个高度确定的容器，会让过长的池子向右溢出成额外列，因此让列盒自适应内容、只由外层滚动。粘贴监听挂在 `document` 上，按「本模块是否为当前标签」门控（其余视图仍挂载、只是 `display:none`），并且在焦点位于文本域时跳过——工作台下方的对话输入框就是文本域，粘到那里应归对话处理，而不是悄悄落进这个池子。每张图可单独删除、可一键清空；删除时记录与其图片字节一起删除。放在导航次分组末尾（与 T恤管理/提示词管理 同组同字号），因为它同样是「不参与生成的素材存储」。
+
+当前模块清单（行为细节以 README 为准，此处只记录范围与归类）：印花提取／印花二创／T恤二创 构成主分组；分割线下方依次为 通用工作台、T恤管理、提示词管理、场景图管理；印花二创另有「导入文件夹」用于批量导入工作台外已产出的印花。其余模块（工作台首页 / 模特管理 / 产品管理）不在当前阶段范围，后续版本开放。
 
 ## Alternatives considered
 
@@ -46,7 +50,7 @@ Status: current
 ## Verification
 
 - `node --check lib/client.js lib/index.js lib/store.js lib/provider.js` → Passed（语法）。
-- `node --test test/host-api.test.js` → **27/27 passed**，覆盖 extract → recreate（job 非阻塞、返回 jobId 即时、轮询到 done 拿结果）→ delete（含变体删除后行消失）→ clear 生命周期，及文件随元数据删除、跨 handler 重开持久化、逃逸文件名拒绝、未知 job 返回 404；两条计时用例证明批量确实并发（而非顺序），两条用 flaky provider 证明单项失败仍保留其余成功结果、全部失败才报错；T恤管理生命周期（含多图选择、按 `tshirtImage` 指定照片、伪造文件名被拒）；T恤二创单对/**笛卡尔积**（2T恤x2印花=4 行、断言配对无重复无遗漏）/按 T恤逐件指定照片/拒绝未知T恤或印花/未选择返回 400/删除单个变体后仅该行消失、其余行保留/清空；**回归用例**：`tshirtRecreate` 用只在 `state.library`（原图库）里的印花 id 必须 404 —— 证明选择器只认「印花二创」的结果（二创印花），不认原图库源印花。
+- `node --test test/host-api.test.js` → **46/46 passed**，覆盖 extract → recreate（job 非阻塞、返回 jobId 即时、轮询到 done 拿结果）→ delete（含变体删除后行消失）→ clear 生命周期，及文件随元数据删除、跨 handler 重开持久化、逃逸文件名拒绝、未知 job 返回 404；两条计时用例证明批量确实并发（而非顺序），两条用 flaky provider 证明单项失败仍保留其余成功结果、全部失败才报错；T恤管理生命周期（含多图选择、按 `tshirtImage` 指定照片、伪造文件名被拒）；T恤二创单对/**笛卡尔积**（2T恤x2印花=4 行、断言配对无重复无遗漏）/按 T恤逐件指定照片/拒绝未知T恤或印花/未选择返回 400/删除单个变体后仅该行消失、其余行保留/清空；通用工作台 generate 的输出数、无参考图纯文生图、缺 prompt 返回 400、删除变体带走参考图、清空、单项失败保留其余；**场景图管理**：每次上传的每张图各自成一条记录（不是一组）、字节可回取、缺 `images` 返回 400、缺名称回落「场景图」、单张删除只带走自己的记录与字节（其余两条断言仍在、被删文件 404）、清空后记录与字节都归零、以及「删除/清空不越界」——清空场景图不影响印花原图库，未知 `kind` 是空操作而非误删其它集合；**回归用例**：`tshirtRecreate` 用只在 `state.library`（原图库）里的印花 id 必须 404 —— 证明选择器只认「印花二创」的结果（二创印花），不认原图库源印花。
 - `require('./lib/index.js')` 导出 `{ apply, createHandler, decodeDataUrl }` → Inspected（合法插件形状，Cordis 要求函数或含 `apply` 的对象）。
 - 组合体检 `dsh --profile web --dump-config` → Inspected，包含 `ecommerce-workbench` 条目并解析到 `dsh-ecommerce-workbench-mock` 包。
 - 浏览器端到端：`/ecom/api/state` 在运行中的 Web GUI 返回真实持久化数据；上传、存储与取回图片字节均确认可用。请在 DSH Web GUI（http://127.0.0.1:3080）硬刷新（Ctrl+Shift+R）确认工作台渲染。

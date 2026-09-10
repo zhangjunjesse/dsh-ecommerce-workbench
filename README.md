@@ -5,8 +5,9 @@ primary UI, so opening DSH lands on the workbench. Ships **印花管理** (印�
 印花二创, real generation) and **T恤二创** (apply a print onto a T恤, real
 generation) as the print pipeline; below a divider sit the non-pipeline items:
 **通用工作台** (free-form prompt + reference images → outputs, the daily driver),
-**T恤管理** (upload and manage multiple reference photos per T恤, no generation)
-and **提示词管理** (saved prompts, pickable from every composer).
+**T恤管理** (upload and manage multiple reference photos per T恤, no generation),
+**提示词管理** (saved prompts, pickable from every composer) and **场景图管理**
+(paste scene photos straight into a masonry pool, no generation).
 
 The workbench is backed by a real Host API that persists to disk: images are
 uploaded, stored as files, and their metadata is kept in `state.json`. Image
@@ -152,6 +153,35 @@ prompt box. Host endpoints: `POST /ecom/api/prompt` (upsert), plus
 `/ecom/api/delete` as `kind: "prompt"` and `/ecom/api/clear` as
 `kind: "prompts"`.
 
+## 场景图管理
+
+The other storage-only module: a **flat pool of scene photos**, nothing more.
+There is no prompt, no picker and no generation — paste an image (**Ctrl+V**
+anywhere in this view), drop files onto the module, or use「上传图片」, and it is
+**stored immediately**: no pending strip and no submit button, because the point
+is capturing reference scenes, not composing a task. A short 「正在保存 N 张…」
+row replaces the hint while bytes are in flight.
+
+Stored photos render as a **masonry waterfall** (`column-width: 220px`), which
+is what makes it a pool rather than a grid: scene photos arrive in every aspect
+ratio, so each tile keeps its own height instead of being cropped to a square.
+The scroll container and the multi-column box are deliberately separate
+elements — a `column-width` box given a definite height would spill an over-long
+pool into extra columns sideways, so the column box is left to size itself and
+the outer box is the only scroller.
+
+Clicking a photo opens the shared lightbox; the button on each tile deletes that
+one photo (**确定删除这张场景图？**), and the toolbar's 清空 empties the pool.
+Deleting removes the record and its image bytes together, like every other
+module. Host endpoints: `POST /ecom/api/scene/add` (one uploaded image = one
+record), `/ecom/api/delete` as `kind: "scene"`, `/ecom/api/clear` as
+`kind: "scenes"`.
+
+One intake rule worth knowing: the paste listener lives on the `document`, gated
+on this module being the active tab, and is skipped while the caret is in a text
+field. The chat composer below the workbench is such a field, so pasting an image
+there stays the chat's business instead of silently landing in this pool.
+
 ## Concurrent generation
 
 A batch — several pasted/uploaded images in one 印花提取 submit, or the N
@@ -191,9 +221,9 @@ already-generated, already-paid-for result in the same batch.
 ## Click to enlarge
 
 Every real image in the workbench (pending paste thumbnails, 原图库 source/result
-pairs, the picked print in 印花二创, the picker grid, and every re-created
-variant) opens in a full-screen lightbox on click — backdrop click or Escape
-closes it. Where click already means something else (the 二创 picker selects a
+pairs, the picked print in 印花二创, the picker grid, every re-created variant, and
+every photo in 场景图管理 / T恤管理) opens in a full-screen lightbox on click —
+backdrop click or Escape closes it. Where click already means something else (the 二创 picker selects a
 print), a small separate zoom icon opens the lightbox instead of hijacking the
 selection click.
 
@@ -201,7 +231,7 @@ selection click.
 
 | File | Half | Role |
 |---|---|---|
-| `lib/index.js` | Host | Serves the `/ecom/api` JSON API (state / extract / recreate / tshirtRecreate / importFolder / importFiles / delete / clear / file / job / tshirt) and picks the image provider (ToAPIs, else local passthrough). |
+| `lib/index.js` | Host | Serves the `/ecom/api` JSON API (state / extract / recreate / tshirtRecreate / importFolder / importFiles / generate / scene/add / delete / clear / file / job / jobs / tshirt / prompt) and picks the image provider (ToAPIs, else local passthrough). |
 | `lib/store.js` | Host | Durable store: `state.json` metadata + `files/<id>.<ext>` image bytes under `$DSH_HOME/ecommerce-workbench`. |
 | `lib/provider.js` | Host | Provider seam. `createToapisProvider()` shells out to `toapis-gpt-image-2/scripts/generate.py` (edit mode) for real extraction/二创/T恤二创 (`extract`/`recreate`/`applyToTshirt`); `createLocalProvider()` is a no-network passthrough fallback. |
 | `lib/client.js` | Client | Registers the workbench as a `conversation.view` tab with React; all UI/state calls the host API. No image processing here. |
@@ -263,13 +293,21 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 ## Verify
 
 - Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/provider.js`
-- Tests: `node --test test/host-api.test.js` (41/41 pass, incl. timing-based
+- Tests: `node --test test/host-api.test.js` (46/46 pass, incl. timing-based
   concurrency proofs, partial-failure proofs — one flaky item still leaves
   the rest of the batch intact — using provider stubs, T恤 create/add-images/
   delete/clear lifecycle, T恤二创 single-pair/cross-product/photo-choice/
-  reject-unknown/delete/clear, and importFolder's file-picking + bulk-import
-  + unreadable-root cases)
+  reject-unknown/delete/clear, 场景图管理's paste-and-store pool (one record per
+  image, per-image delete taking its bytes, clear, and that scene delete/clear
+  stay inside the pool while an unknown `kind` is a no-op), and importFolder's
+  file-picking + bulk-import + unreadable-root cases)
 - Provider: `node -e "const p=require('./lib/provider.js'); console.log(p.defaultScriptPath(), p.hasApiKey())"`
-- Live: restart `dsh web` (host code changed), the hard-refresh the DSH web GUI
-  (Ctrl+Shift+R); the workbench renders and `/ecom/api/state` returns persisted
-  data.
+- Config combines (layout-independent, proves the bundle mounts):
+  `node "<npm-global>/node_modules/@deepseek-ai/dsh/lib/bin.js" --profile web --dump-config`
+  — expect exit 0 and an `id: ecommerce-workbench` entry. (`~/.dsh/tools/dsh-doctor.mjs`
+  assumes a DSH **Desktop** layout; on an npm-global install its anchor/`dsh-app-boot`
+  checks fail spuriously while the farm and `profiles/` checks still apply.)
+- Live: **refresh the profile copy first** (see "Deploying an edit" above —
+  `dsh plugin remove` + `add`), then restart `dsh web` (host code changed) and
+  hard-refresh the DSH web GUI (Ctrl+Shift+R); the workbench renders and
+  `/ecom/api/state` returns persisted data.

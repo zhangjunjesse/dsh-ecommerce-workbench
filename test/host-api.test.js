@@ -868,3 +868,94 @@ test("generate keeps successful outputs even when one fails", async () => {
   assert.equal(job.row.prints.length, 2, "the two successful outputs are kept");
   assert.ok(job.error && /1 张生成失败/.test(job.error), "failure surfaced as a warning: " + job.error);
 });
+
+// ---------- 场景图管理: a flat pool of scene photos (paste-and-store, no generation) ----------
+
+test("scene/add stores each uploaded image as its own record and serves its bytes back", async () => {
+  const { handler } = await freshHandler();
+
+  const empty = await call(handler, "GET", "/ecom/api/state");
+  assert.deepEqual(empty.json.scenes, []);
+
+  const res = await call(handler, "POST", "/ecom/api/scene/add", {
+    images: [
+      { name: "street.png", dataUrl: PNG_DATA_URL },
+      { name: "cafe.png", dataUrl: PNG_DATA_URL }
+    ]
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.ok, true);
+  assert.equal(res.json.scenes.length, 2, "one record per image, not one group");
+  assert.equal(res.json.scenes[0].name, "street.png");
+
+  const state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.scenes.length, 2);
+
+  const file = await call(handler, "GET", "/ecom/api/file/" + res.json.scenes[0].file);
+  assert.equal(file.status, 200);
+  assert.equal(file.res.headers["content-type"], "image/png");
+});
+
+test("scene/add requires images and defaults a missing name", async () => {
+  const { handler } = await freshHandler();
+  const empty = await call(handler, "POST", "/ecom/api/scene/add", { images: [] });
+  assert.equal(empty.status, 400);
+
+  const noName = await call(handler, "POST", "/ecom/api/scene/add", { images: [{ dataUrl: PNG_DATA_URL }] });
+  assert.equal(noName.json.scenes[0].name, "场景图");
+});
+
+test("deleting one scene image removes only that record and its file", async () => {
+  const { handler, store } = await freshHandler();
+  const added = await call(handler, "POST", "/ecom/api/scene/add", {
+    images: [
+      { name: "a.png", dataUrl: PNG_DATA_URL },
+      { name: "b.png", dataUrl: PNG_DATA_URL },
+      { name: "c.png", dataUrl: PNG_DATA_URL }
+    ]
+  });
+  const [a, b, c] = added.json.scenes;
+  assert.equal((await readdir(store.filesDir)).length, 3);
+
+  await call(handler, "POST", "/ecom/api/delete", { kind: "scene", id: a.id });
+  const state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.scenes.length, 2);
+  assert.deepEqual(state.json.scenes.map((s) => s.id), [b.id, c.id], "the other two are untouched");
+  assert.equal((await readdir(store.filesDir)).length, 2, "only the deleted image's bytes are gone");
+
+  const gone = await call(handler, "GET", "/ecom/api/file/" + a.file);
+  assert.equal(gone.status, 404);
+});
+
+test("clearing scenes removes every record and its files", async () => {
+  const { handler, store } = await freshHandler();
+  await call(handler, "POST", "/ecom/api/scene/add", { images: [{ name: "a.png", dataUrl: PNG_DATA_URL }] });
+  await call(handler, "POST", "/ecom/api/scene/add", { images: [{ name: "b.png", dataUrl: PNG_DATA_URL }] });
+  assert.equal((await readdir(store.filesDir)).length, 2);
+
+  await call(handler, "POST", "/ecom/api/clear", { kind: "scenes" });
+  const state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.scenes.length, 0);
+  assert.equal((await readdir(store.filesDir)).length, 0);
+});
+
+test("scene delete and clear stay inside the scene pool", async () => {
+  const { handler, store } = await freshHandler();
+  const print = (await extractJob(handler, { images: [{ name: "p.png", dataUrl: PNG_DATA_URL }] })).prints[0];
+  const scene = (await call(handler, "POST", "/ecom/api/scene/add", { images: [{ name: "s.png", dataUrl: PNG_DATA_URL }] })).json.scenes[0];
+  const filesBefore = (await readdir(store.filesDir)).length;
+
+  await call(handler, "POST", "/ecom/api/clear", { kind: "scenes" });
+  let state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.scenes.length, 0);
+  assert.equal(state.json.library.length, 1, "the 印花原图库 keeps its print");
+  assert.equal((await readdir(store.filesDir)).length, filesBefore - 1, "only the scene image's bytes went");
+
+  // A shared delete/clear switch: an unrecognised kind must be a no-op rather
+  // than falling through into another collection's removal.
+  await call(handler, "POST", "/ecom/api/delete", { kind: "nope", id: scene.id });
+  await call(handler, "POST", "/ecom/api/delete", { kind: "nope", id: print.id });
+  state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.library.length, 1);
+  assert.equal((await readdir(store.filesDir)).length, filesBefore - 1);
+});
