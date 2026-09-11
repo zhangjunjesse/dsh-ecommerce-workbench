@@ -312,6 +312,12 @@ test("the pipeline panel renders its groups, estimate and four result stages", (
   const missing = [
     ["参考图分组", "the panel heading"],
     ["收图目录", "where to drop folders by hand"],
+    // The upload flow is staged-then-submit. It used to write on file-select,
+    // which quietly required the group name to be typed FIRST — picking the
+    // screenshots and then naming them (the natural order) silently failed.
+    ["选择图片", "the picker button"],
+    ["创建分组", "the explicit submit for the staged screenshots"],
+    ["还没有选图", "the staged-count hint, so a pick that did nothing is visible"],
     ["商品A", "an inbox group"],
     ["商品B", "a second group"],
     ["已完成", "a finished group's status"],

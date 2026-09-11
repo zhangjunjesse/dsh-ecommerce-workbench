@@ -331,7 +331,10 @@ test("approval queues a group for the scheduler, and a manual run needs none", a
   // unapproved group at all.
   const idle = await runPipeline(handler, undefined);
   assert.equal(idle.status, "success");
-  assert.match(idle.summary, /没有待处理的分组/);
+  assert.match(idle.summary, /没有已确认/);
+  // The message must say what to do, not just that nothing happened: a run with
+  // no target otherwise reads exactly like a broken button.
+  assert.match(idle.summary, /估算并运行/);
 
   const approved = await call(handler, "POST", "/ecom/api/workflow/group/approve", {
     groupKey: groupKey, approved: true, tshirtImages: []
@@ -352,7 +355,7 @@ test("a done group is not picked up again, but re-approving re-queues it", async
   await runPipeline(handler, undefined);
 
   const idle = await runPipeline(handler, undefined);
-  assert.match(idle.summary, /没有待处理的分组/, "a finished group leaves the queue");
+  assert.match(idle.summary, /没有已确认/, "a finished group leaves the queue");
 
   await call(handler, "POST", "/ecom/api/workflow/group/approve", { groupKey: groupKey, approved: true });
   const picked = await runPipeline(handler, undefined);
