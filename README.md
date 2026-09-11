@@ -3,11 +3,13 @@
 A DSH plugin that renders a local e-commerce design workbench as the profile's
 primary UI, so opening DSH lands on the workbench. Ships **印花管理** (印花提取 +
 印花二创, real generation) and **T恤二创** (apply a print onto a T恤, real
-generation) as the print pipeline; below a divider sit the non-pipeline items:
-**通用工作台** (free-form prompt + reference images → outputs, the daily driver),
-**T恤管理** (upload and manage multiple reference photos per T恤, no generation),
-**提示词管理** (saved prompts, pickable from every composer) and **场景图管理**
-(paste scene photos straight into a masonry pool, no generation).
+generation) as the print pipeline, plus **工作流** (schedule and trigger
+automation, and read its run logs) directly beneath 印花二创; below a divider sit
+the non-pipeline items: **通用工作台** (free-form prompt + reference images →
+outputs, the daily driver), **T恤管理** (upload and manage multiple reference
+photos per T恤, no generation), **提示词管理** (saved prompts, pickable from
+every composer) and **场景图管理** (paste scene photos straight into a masonry
+pool, no generation).
 
 The workbench is backed by a real Host API that persists to disk: images are
 uploaded, stored as files, and their metadata is kept in `state.json`. Image
@@ -71,6 +73,108 @@ group below a divider rather than beside the generation-facing modules:
   any time (e.g. front, back, tag, detail shots collected over several visits).
 - Per-image remove, per-T恤 delete, and a clear-all action are available; every
   photo opens in the click-to-enlarge lightbox like the rest of the workbench.
+
+## 工作流
+
+A scheduled/manual automation module, in the primary nav group directly under
+T恤二创 (it *does* work on its own, unlike the storage-only modules below the
+divider).
+
+**A workflow is code, not data.** Each one is a definition registered in
+`lib/workflows.js` (`{ id, name, description, run(ctx) }`), and the module ships
+with **none registered** — so the view opens on an empty state that says where a
+workflow comes from, rather than an empty list that looks like a feature nobody
+has used yet. What the user owns is everything around the body: whether it is
+enabled, its schedule, triggering it by hand, and its run history. Adding a
+workflow is a code change — write the definition, list it in
+`BUILT_IN_WORKFLOWS`, and it appears in the view with its own settings and
+history, with no client change.
+
+The `ctx` a workflow is handed carries `log(message, level)` (bounded, per-run),
+the durable `store`, a concurrency-guarded `provider`, and `trigger`/`now()`.
+The definition is validated at mount — a malformed one throws in front of whoever
+just wrote it, instead of surfacing hours later as a scheduled run failing in the
+dark.
+
+**Scheduling: two shapes, deliberately.** An interval (every N minutes, 1 …
+10080) or a fixed local wall-clock time (每天 HH:MM). Cron was considered and
+rejected — it would add a parser, a timezone model and a DST story to answer a
+question nobody has asked yet. The next occurrence is always recomputed from the
+wall clock rather than by adding an interval to the previous one, so a
+long-running host cannot drift, and a daily time stays on its wall clock across a
+DST change.
+
+**Enabling never fires immediately.** Turning a workflow on, or changing its
+schedule, recomputes the next occurrence to one interval from now. Flipping a
+switch therefore cannot cause a surprise run, and a stale timestamp from before
+the change cannot fire the moment the scheduler looks at it. 立即运行 covers
+impatience.
+
+**Missed occurrences are skipped, never caught up.** The scheduler lives inside
+the host process — a workflow only fires while DSH is running, nothing is
+registered with the OS — so an occurrence that came due while DSH was down is
+recorded **once** in the history as 已跳过 and the schedule moves on. Catching up
+would mean a burst of real (possibly billable) executions the moment DSH starts,
+the opposite of what 「每 30 分钟」 was understood to mean. The same rule holds
+while the host is up: a host busy for three intervals fires once, not three
+times.
+
+**One run at a time per workflow.** A schedule that comes due while the previous
+run is still going is skipped and counted, not queued — queueing would let a slow
+workflow build an unbounded backlog, and every queued run would be a real
+execution. The count is reported in the running run's log when it finishes, so
+the skip is visible without writing a history entry per tick. 停用 stops the
+*schedule*; it does not forbid 立即运行.
+
+**Every attempt leaves a record.** Trigger (手动/周期), status (运行中 / 成功 /
+失败 / 已跳过), start time, duration, a one-line summary returned by the workflow,
+and its log lines. The history table carries **no** log lines
+(`GET /ecom/api/workflow/runs`); one run's logs come from
+`GET /ecom/api/workflow/run?id=…`, so drawing the table never moves the whole
+archive. Logs are held in memory during a run and written **once**, at the end —
+a write per line would mean thousands of `state.json` rewrites for a chatty
+workflow. All bounded: the last **50** runs per workflow
+(`ECOM_WORKFLOW_RUN_KEEP`), **500** across all workflows
+(`ECOM_WORKFLOW_RUN_TOTAL`), **500** log lines per run
+(`ECOM_WORKFLOW_LOG_LINES`), each line clipped at 2000 characters.
+
+**A workflow cannot bypass the generation cap.** The provider it is handed is a
+wrapper whose every method acquires the shared `withGeneration` slot, so there is
+no unguarded path *by construction* rather than by convention. `withGeneration`
+itself is deliberately not exposed to a workflow: nesting it (an outer slot
+around a guarded provider call) would let two concurrent workflows hold one slot
+each while each waits for a second, which deadlocks against the cap of 2.
+
+**Deliberately absent.** There is no 「停止运行」 button: a provider call already
+in flight cannot actually be interrupted, and a button that does nothing is worse
+than no button. A run that was in flight when the host exited is instead closed
+out at the next mount as 失败（宿主在这次运行期间退出）rather than sitting in
+history claiming to be running forever.
+
+Host endpoints: `POST /ecom/api/workflow/config` (enable / schedule),
+`POST /ecom/api/workflow/run` (manual trigger → `runId` at once; 409 if one is
+already in flight), `GET /ecom/api/workflow/runs`,
+`GET /ecom/api/workflow/run`, `POST /ecom/api/workflow/clear`. `/ecom/api/state`
+also returns `workflows`: one entry per registered definition, merged from the
+registry (what exists in code) and the store (what the user changed about it),
+plus its live running state.
+
+### Why the store now writes atomically
+
+Workflow runs write `state.json` repeatedly while the client polls
+`/ecom/api/state`, which exposed a latent defect in the store: `writeFile`
+truncates the target before writing it, so a concurrent read could observe a
+half-written file, fail to parse it, and surface to the client as a 500. Both
+documents are now written to a sibling temp file and renamed into place, so a
+reader always sees either the previous complete document or the new one — never a
+torn one.
+
+The same change made an older, documented race in the generation jobs (a job
+marked `done` *before* awaiting the `store.update` that persists its row) show up
+far more often, because atomic writes widen that window slightly. That ordering
+is fixed too: the row is persisted first, and only then is the job published as
+done, so a poller acting on 「已完成」 always finds the result already in
+`/ecom/api/state`.
 
 ## Importing already-finished prints from disk
 
@@ -162,13 +266,70 @@ anywhere in this view), drop files onto the module, or use「上传图片」, an
 is capturing reference scenes, not composing a task. A short 「正在保存 N 张…」
 row replaces the hint while bytes are in flight.
 
-Stored photos render as a **masonry waterfall** (`column-width: 220px`), which
-is what makes it a pool rather than a grid: scene photos arrive in every aspect
-ratio, so each tile keeps its own height instead of being cropped to a square.
-The scroll container and the multi-column box are deliberately separate
-elements — a `column-width` box given a definite height would spill an over-long
-pool into extra columns sideways, so the column box is left to size itself and
-the outer box is the only scroller.
+Photos are shown **newest first**, and they render as a **masonry waterfall**:
+scene photos arrive in every aspect ratio, so each tile keeps its own height
+instead of being cropped to a square.
+
+The waterfall is packed into explicit flex columns — one `<div>` per column,
+round-robin, so photo *i* goes to column *i % n* — and **not** into CSS
+multi-column. That is a correctness fix, not a style preference: `column-width`
+fills column 1 to the bottom before it starts column 2, so a newest-first list
+reads as 0, n, 2n… across the top row. The newest photos all end up stacked in
+the leftmost column and the visible order looks scrambled. Round-robin puts the
+newest *n* photos across the first row instead, so scanning left to right and
+then downwards scans newest to oldest. The column count follows the container
+width (`ResizeObserver`, ~220px per column).
+
+The order itself is enforced at the contract boundary, not left to whoever wrote
+last: `GET /ecom/api/state` sorts `scenes` by `createdAt` descending, so an
+out-of-order write or a hand-edited `state.json` cannot silently make the pool
+non-chronological. One paste is one moment — every photo in a single batch
+shares one `createdAt`, so the order is decided *between* uploads rather than by
+which file in the batch happened to finish its I/O first.
+
+One bound worth stating plainly: because the columns have independent heights, a
+waterfall cannot *also* guarantee a strict global chronological order — the
+(n+1)-th photo can sit above or below the n-th depending on tile heights. What
+is guaranteed is that the newest photos come first, left to right.
+
+### Why the pool is not rendered all at once
+
+Measured against the real library (222 photos at the time of writing): 163 MB on
+disk, ~0.74 MB per file, 600x800 — about **1.7 MB of decoded bitmap each**, and
+~409 MB if every one were mounted and decoded together. Two things stop that
+being paid up front:
+
+- **Height is reserved before the bytes arrive — but only when the size is
+  genuinely known.** The host measures each photo from the header of the bytes it
+  just stored (`lib/imageSize.js`; PNG/GIF/JPEG/WebP, no image library and no new
+  dependency), never from anything a caller claims, and the tile sets
+  `aspect-ratio` from it so a column does not jump when its images decode.
+  Photos stored before this carry no size until a one-time startup backfill reads
+  them from their files.
+- **An unknown size leaves the ratio unset.** This is the load-bearing rule, not
+  a nicety: `aspect-ratio` is a promise about the content, and an `<img>` uses
+  `object-fit: fill` by default, so a *guessed* ratio stretches the photo. An
+  earlier revision of this feature defaulted unknown sizes to `3 / 4` and
+  visibly distorted the 42 of 223 photos whose real ratio differs from 3:4 by
+  more than 2% (one is nearly square). A photo with no known size now lays out at
+  its natural ratio; the only cost is a possible shift as it loads, and a shift
+  beats a distorted photo.
+- **Tiles are mounted a page at a time.** Only the first `SCENE_PAGE` (36) tiles
+  exist; a sentinel below them raises the count by one more page whenever it
+  scrolls into view, and the toolbar reads 「N 张场景图 · 已显示 M」while more
+  remain. Without `IntersectionObserver` the pool renders everything rather than
+  hiding photos behind a page size that nothing could advance.
+
+`loading="lazy"` on every tile plus the `immutable` cache header on `/file/` do
+the rest: off-screen photos are never fetched, and re-visits never re-transfer.
+
+Deliberately **not** done yet: a paged `/ecom/api/scenes?offset&limit` API, and
+server-side thumbnails. The metadata payload is 112 bytes per photo (~110 KB at
+1000 photos), and images are served over loopback, so neither is the binding
+constraint today. Server-side thumbnails would also mean depending on `sharp`,
+which currently resolves only as a **transitive dependency of DSH itself** —
+borrowing it would make this plugin break the next time DSH is upgraded, the way
+`redfox-community-dsh` disappeared in the 0.1.5 upgrade.
 
 Clicking a photo opens the shared lightbox; the button on each tile deletes that
 one photo (**确定删除这张场景图？**), and the toolbar's 清空 empties the pool.
@@ -231,13 +392,19 @@ selection click.
 
 | File | Half | Role |
 |---|---|---|
-| `lib/index.js` | Host | Serves the `/ecom/api` JSON API (state / extract / recreate / tshirtRecreate / importFolder / importFiles / generate / scene/add / delete / clear / file / job / jobs / tshirt / prompt) and picks the image provider (ToAPIs, else local passthrough). |
-| `lib/store.js` | Host | Durable store: `state.json` metadata + `files/<id>.<ext>` image bytes under `$DSH_HOME/ecommerce-workbench`. |
+| `lib/index.js` | Host | Serves the `/ecom/api` JSON API (state / extract / recreate / tshirtRecreate / importFolder / importFiles / generate / scene/add / delete / clear / file / job / jobs / tshirt / prompt / workflow/*) and picks the image provider (ToAPIs, else local passthrough). |
+| `lib/store.js` | Host | Durable store: `state.json` metadata + `workflow-runs.json` run history + `files/<id>.<ext>` image bytes under `$DSH_HOME/ecommerce-workbench`. Both documents are replaced atomically (temp file + rename) so a concurrent read can never see a half-written file. |
+| `lib/imageSize.js` | Host | Dependency-free image header reader (PNG/GIF/JPEG/WebP). Returns `null` rather than guessing, because a guessed ratio is what stretches a photo. |
 | `lib/provider.js` | Host | Provider seam. `createToapisProvider()` shells out to `toapis-gpt-image-2/scripts/generate.py` (edit mode) for real extraction/二创/T恤二创 (`extract`/`recreate`/`applyToTshirt`); `createLocalProvider()` is a no-network passthrough fallback. |
+| `lib/workflows.js` | Host | The workflow registry: the one place a workflow is declared, its definition validated at mount, and — by design — an **empty** built-in list. Holds no state. |
+| `lib/workflowRunner.js` | Host | Executes a workflow and records every attempt: run records, log capture and caps, one-run-per-workflow, history retention, crash recovery, and the concurrency-guarded provider a workflow is allowed to see. |
+| `lib/scheduler.js` | Host | Schedule shapes and arithmetic (interval / daily), the in-process tick, and missed-occurrence detection. Pure time logic plus a timer — no workflow knowledge. |
 | `lib/client.js` | Client | Registers the workbench as a `conversation.view` tab with React; all UI/state calls the host API. No image processing here. |
 | `cordis.patch.yml` | Patch | Inserts the `ecommerce-workbench` bundle entry. |
-| `test/host-api.test.js` | Test | Drives the real handler + store through the full extract → recreate → delete → clear lifecycle (with the local provider). |
+| `test/host-api.test.js` | Test | Drives the real handler + store through the full extract → recreate → delete → clear lifecycle (with the local provider), plus the workflow engine end to end: config, manual runs, failure, single-flight, scheduling, missed occurrences, retention, crash recovery, and persistence. |
+| `test/client-render.test.js` | Test | Builds the real client component tree with a minimal React stand-in, covering the 工作流 empty state, cards, schedule controls, run statuses and the log panel — the parts a syntax check cannot validate. |
 | `docs/DECISION-0001-*.md` | Decision | Owning decision record for the workbench-as-view-tab design. |
+| `docs/DECISION-0002-*.md` | Decision | Owning decision record for the workflow engine (why workflows are code, why schedules are two shapes, why misses are skipped). |
 
 ## Wiring
 
@@ -292,15 +459,42 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 
 ## Verify
 
-- Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/provider.js`
-- Tests: `node --test test/host-api.test.js` (46/46 pass, incl. timing-based
-  concurrency proofs, partial-failure proofs — one flaky item still leaves
-  the rest of the batch intact — using provider stubs, T恤 create/add-images/
-  delete/clear lifecycle, T恤二创 single-pair/cross-product/photo-choice/
-  reject-unknown/delete/clear, 场景图管理's paste-and-store pool (one record per
-  image, per-image delete taking its bytes, clear, and that scene delete/clear
-  stay inside the pool while an unknown `kind` is a no-op), and importFolder's
-  file-picking + bulk-import + unreadable-root cases)
+- Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js`
+- Tests: `node --test "test/*.test.js"` (**70/70 pass**). (The quoted glob is
+  required: `node --test test/` is not usable on this Node/Windows combination —
+  it tries to load the directory as a module. The two files can also be listed
+  explicitly.)
+  - `test/host-api.test.js` (67) covers the original lifecycle — timing-based
+    concurrency proofs, partial-failure proofs (one flaky item still leaves the
+    rest of the batch intact, using provider stubs), T恤 create/add-images/
+    delete/clear, T恤二创 single-pair/cross-product/photo-choice/reject-unknown/
+    delete/clear, 场景图管理's paste-and-store pool (one record per image,
+    per-image delete taking its bytes, clear, delete/clear staying inside the
+    pool while an unknown `kind` is a no-op, newest-first even when the stored
+    order is reversed), and importFolder's file-picking + bulk-import +
+    unreadable-root cases — plus the workflow engine, driven through an
+    **injected registry** so no placeholder workflow has to ship to users:
+    definition validation, schedule normalisation and date arithmetic, config
+    (enable/schedule/recompute/clear, and that a rejected schedule changes
+    nothing), manual runs (logs, summary, durable on settle), failure
+    (recorded, handler still serving), single-flight (409 pointing at the run
+    already in flight), scheduling (due fires once, not-due and disabled do
+    not), a missed occurrence (exactly one 已跳过 entry, nothing executed, the
+    schedule moved past it), overlap (skipped ticks counted, no backlog),
+    log caps, history retention per workflow, clearing, crash recovery, that a
+    workflow's provider calls go through the shared semaphore while
+    `withGeneration` is unreachable, and that config + history survive reopening
+    the store.
+  - `test/client-render.test.js` (3) builds the real client component tree with
+    a minimal React stand-in: the 工作流 empty state, the cards/controls/log
+    panel with every run status, and that the nav, `viewNames` and `viewEls`
+    lists cannot drift apart (a mismatch shows the wrong view under a nav label,
+    silently and only after the insertion point).
+- Both test files were run repeatedly (30× host, 8× both) to confirm the suite
+  is stable. Two races that used to flake are fixed rather than tolerated: the
+  generation jobs published `done` before awaiting their `store.update`, and
+  `/ecom/api/state` could combine a config snapshot with a separately-taken
+  in-memory snapshot and report a finished workflow run as still running.
 - Provider: `node -e "const p=require('./lib/provider.js'); console.log(p.defaultScriptPath(), p.hasApiKey())"`
 - Config combines (layout-independent, proves the bundle mounts):
   `node "<npm-global>/node_modules/@deepseek-ai/dsh/lib/bin.js" --profile web --dump-config`
@@ -311,3 +505,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
   `dsh plugin remove` + `add`), then restart `dsh web` (host code changed) and
   hard-refresh the DSH web GUI (Ctrl+Shift+R); the workbench renders and
   `/ecom/api/state` returns persisted data.
+  - With no workflow registered, 工作流 shows its empty state — that is the
+    expected result, not a broken page. Registering the first workflow is the
+    only way to exercise the cards, the schedule pickers and the log panel in a
+    real browser.

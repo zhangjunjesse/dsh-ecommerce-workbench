@@ -14,9 +14,21 @@ const { mkdtemp, readdir } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 
-const { createHandler, decodeDataUrl } = require("../lib/index.js");
+const {
+  createHandler,
+  decodeDataUrl,
+  backfillSceneSizes,
+  createRegistry,
+  createWorkflowRunner,
+  createScheduler,
+  normalizeSchedule,
+  nextRunAfter,
+  BUILT_IN_WORKFLOWS
+} = require("../lib/index.js");
 const { createStore } = require("../lib/store.js");
 const { createLocalProvider } = require("../lib/provider.js");
+const { readImageSize } = require("../lib/imageSize.js");
+const { RUN_KEEP_PER_WORKFLOW, MAX_LOG_LINES } = require("../lib/workflowRunner.js");
 
 /** Smallest valid PNG, as a browser would hand it over. */
 const PNG_DATA_URL =
@@ -958,4 +970,534 @@ test("scene delete and clear stay inside the scene pool", async () => {
   state = await call(handler, "GET", "/ecom/api/state");
   assert.equal(state.json.library.length, 1);
   assert.equal((await readdir(store.filesDir)).length, filesBefore - 1);
+});
+
+test("the scene pool is served newest-first even when the stored order drifts", async () => {
+  const { handler, store } = await freshHandler();
+  await call(handler, "POST", "/ecom/api/scene/add", { images: [{ name: "a.png", dataUrl: PNG_DATA_URL }] });
+  await call(handler, "POST", "/ecom/api/scene/add", { images: [{ name: "b.png", dataUrl: PNG_DATA_URL }] });
+
+  // Pin explicit, distinct upload times AND store them oldest-first, so the
+  // assertion exercises the serving order rather than Date.now() resolution and
+  // the accident of this route's writer prepending.
+  await store.update(function (state) {
+    state.scenes = [
+      Object.assign({}, state.scenes[1], { name: "oldest", createdAt: 1000 }),
+      Object.assign({}, state.scenes[0], { name: "newest", createdAt: 2000 })
+    ];
+  });
+
+  const state = await call(handler, "GET", "/ecom/api/state");
+  assert.deepEqual(state.json.scenes.map((s) => s.name), ["newest", "oldest"]);
+});
+
+test("scene/add records the real pixel size, measured from the bytes it stored", async () => {
+  const { handler } = await freshHandler();
+  const res = await call(handler, "POST", "/ecom/api/scene/add", {
+    images: [
+      { name: "measured.png", dataUrl: PNG_DATA_URL },
+      // A size asserted by the caller is ignored. The host measures the bytes it
+      // actually stored, so a wrong (or merely absent) claim cannot stretch a
+      // tile — which is exactly the defect this field exists to prevent.
+      { name: "lying.png", dataUrl: PNG_DATA_URL, width: 6000, height: 8000 }
+    ]
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.scenes[0].width, 1, "the 1x1 fixture is measured, not assumed");
+  assert.equal(res.json.scenes[0].height, 1);
+  assert.equal(res.json.scenes[1].width, 1, "the caller's claim does not win");
+  assert.equal(res.json.scenes[1].height, 1);
+});
+
+test("readImageSize reads PNG/GIF/JPEG/WebP headers, and refuses to guess", () => {
+  assert.deepEqual(readImageSize(PNG_BYTES), { width: 1, height: 1 });
+
+  const gif = Buffer.alloc(16);
+  gif.write("GIF89a", 0, "latin1");
+  gif.writeUInt16LE(12, 6);
+  gif.writeUInt16LE(7, 8);
+  assert.deepEqual(readImageSize(gif), { width: 12, height: 7 });
+
+  const jpeg = Buffer.alloc(32);
+  jpeg.writeUInt16BE(0xffd8, 0);   // SOI
+  jpeg.writeUInt16BE(0xffc0, 2);   // SOF0
+  jpeg.writeUInt16BE(17, 4);       // segment length
+  jpeg[6] = 8;                     // sample precision
+  jpeg.writeUInt16BE(512, 7);      // height
+  jpeg.writeUInt16BE(768, 9);      // width
+  assert.deepEqual(readImageSize(jpeg), { width: 768, height: 512 });
+
+  const webp = Buffer.alloc(32);
+  webp.write("RIFF", 0, "latin1");
+  webp.write("WEBP", 8, "latin1");
+  webp.write("VP8X", 12, "latin1");
+  webp[24] = 99;                   // width - 1
+  webp[27] = 199;                  // height - 1
+  assert.deepEqual(readImageSize(webp), { width: 100, height: 200 });
+
+  // Unsupported, truncated or hostile input must read as "unknown" — never a
+  // guessed ratio, because a guess is what distorts the photo on screen.
+  assert.equal(readImageSize(Buffer.alloc(0)), null);
+  assert.equal(readImageSize(Buffer.from("GIF89a")), null);
+  assert.equal(readImageSize(Buffer.from("RIFF____WEBP")), null);
+  assert.equal(readImageSize(PNG_BYTES.subarray(0, 12)), null);
+  assert.equal(readImageSize(null), null);
+});
+
+test("backfillSceneSizes measures photos stored before sizes were recorded", async () => {
+  const { handler, store } = await freshHandler();
+  await call(handler, "POST", "/ecom/api/scene/add", { images: [{ name: "legacy.png", dataUrl: PNG_DATA_URL }] });
+  // Simulate a record written before this field existed.
+  await store.update(function (state) {
+    state.scenes = state.scenes.map(function (s) {
+      return { id: s.id, file: s.file, name: s.name, createdAt: s.createdAt };
+    });
+  });
+  assert.equal((await call(handler, "GET", "/ecom/api/state")).json.scenes[0].width, undefined);
+
+  assert.equal(await backfillSceneSizes(store), 1);
+  const state = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(state.json.scenes[0].width, 1);
+  assert.equal(state.json.scenes[0].height, 1);
+
+  assert.equal(await backfillSceneSizes(store), 0, "running it again has nothing left to do");
+});
+
+test("backfillSceneSizes leaves an unreadable photo unknown instead of guessing", async () => {
+  const { handler, store } = await freshHandler();
+  await call(handler, "POST", "/ecom/api/scene/add", { images: [{ name: "gone.png", dataUrl: PNG_DATA_URL }] });
+  await store.update(function (state) {
+    state.scenes = state.scenes.map(function (s) {
+      return { id: s.id, file: "no-such-file.png", name: s.name, createdAt: s.createdAt };
+    });
+  });
+
+  assert.equal(await backfillSceneSizes(store), 0);
+  assert.equal((await call(handler, "GET", "/ecom/api/state")).json.scenes[0].width, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// 工作流 (workflow engine)
+//
+// The engine ships with **no** registered workflow (lib/workflows.js exports an
+// empty list on purpose), so every test here injects its own definitions through
+// `createHandler`'s options. That is the point of the injection seam: the engine
+// — scheduling, single-flight, history, logs, retention — is exercised for real
+// without shipping a placeholder workflow to users.
+// ---------------------------------------------------------------------------
+
+/**
+ * A handler over a fresh temp store whose workflow registry and clock are
+ * injected. Time is a plain mutable number, so scheduling is driven directly
+ * instead of by sleeping through real intervals.
+ */
+async function freshWorkflowHandler(definitions, startAt) {
+  const root = await mkdtemp(join(tmpdir(), "ecom-wf-"));
+  const store = createStore(root);
+  const registry = createRegistry(definitions || []);
+  let current = typeof startAt === "number" ? startAt : new Date(2026, 0, 5, 3, 0, 0, 0).getTime();
+  const clock = function () { return current; };
+  const handler = createHandler(store, createLocalProvider(), { registry: registry, now: clock });
+  return {
+    handler,
+    store,
+    registry,
+    root,
+    now: clock,
+    advance: function (ms) { current += ms; },
+    set: function (ms) { current = ms; }
+  };
+}
+
+/** Poll one run through the HTTP endpoint until it leaves the "running" state. */
+async function waitRun(handler, runId) {
+  for (let i = 0; i < 200; i++) {
+    const r = await call(handler, "GET", "/ecom/api/workflow/run?id=" + encodeURIComponent(runId));
+    if (r.status === 200 && r.json.run && r.json.run.status !== "running") return r.json.run;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("workflow run did not settle: " + runId);
+}
+
+/**
+ * Wait until a workflow has no in-flight record.
+ *
+ * Distinct from `waitRun` on purpose: a run reports its final status as soon as
+ * it is *known*, but its record is deliberately kept in the active map until the
+ * outcome has been written to disk — that ordering is what stops a reader
+ * falling into the gap between "finished" and "persisted". So "the outcome is
+ * visible" and "the record has been dropped" are two different moments.
+ */
+async function waitIdle(runner, workflowId) {
+  for (let i = 0; i < 200; i++) {
+    if (runner.activeRun(workflowId) === null) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("workflow stayed active: " + workflowId);
+}
+
+/** The workflow every test starts from: two log lines and a summary. */
+const WF_ECHO = {
+  id: "test.echo",
+  name: "测试回显",
+  description: "记录两行日志并返回摘要",
+  async run(ctx) {
+    ctx.log("第一行");
+    ctx.log("第二行", "warn");
+    return "完成 2 步";
+  }
+};
+
+test("createRegistry validates definitions up front, and the built-in set is empty", () => {
+  assert.equal(createRegistry().size, 0);
+  assert.equal(createRegistry(BUILT_IN_WORKFLOWS).size, 0, "工作流引擎不内置任何工作流");
+  assert.throws(() => createRegistry([{ id: "x", name: "n" }]), /needs a run/);
+  assert.throws(() => createRegistry([{ id: "bad id", name: "n", async run() {} }]), /id must match/);
+  assert.throws(() => createRegistry([{ id: "x", name: "   ", async run() {} }]), /non-empty name/);
+  assert.throws(() => createRegistry([WF_ECHO, WF_ECHO]), /duplicate workflow id/);
+  assert.throws(() => createRegistry("nope"), /must be an array/);
+  assert.equal(createRegistry([WF_ECHO]).get("test.echo").name, "测试回显");
+});
+
+test("normalizeSchedule accepts only the two documented shapes", () => {
+  assert.deepEqual(normalizeSchedule({ type: "interval", everyMinutes: 15 }), { type: "interval", everyMinutes: 15 });
+  assert.deepEqual(normalizeSchedule({ type: "daily", atTime: "07:05" }), { type: "daily", atTime: "07:05" });
+  assert.equal(normalizeSchedule(null), null);
+  assert.equal(normalizeSchedule(undefined), null);
+  const rejected = [
+    { type: "interval", everyMinutes: 0 },
+    { type: "interval", everyMinutes: 1.5 },
+    { type: "interval", everyMinutes: 20000 },
+    { type: "interval" },
+    { type: "daily", atTime: "24:00" },
+    { type: "daily", atTime: "9:00" },
+    { type: "cron", expression: "* * * * *" },
+    "hourly",
+    []
+  ];
+  for (const bad of rejected) {
+    assert.throws(() => normalizeSchedule(bad), (error) => error.code === "BAD_SCHEDULE", "should reject " + JSON.stringify(bad));
+  }
+});
+
+test("nextRunAfter computes interval and daily occurrences from the wall clock", () => {
+  assert.equal(nextRunAfter({ type: "interval", everyMinutes: 30 }, 1000), 1000 + 30 * 60000);
+
+  const morning = new Date(2026, 0, 5, 3, 0, 0, 0).getTime();
+  const nineToday = new Date(2026, 0, 5, 9, 0, 0, 0).getTime();
+  const nineTomorrow = new Date(2026, 0, 6, 9, 0, 0, 0).getTime();
+  assert.equal(nextRunAfter({ type: "daily", atTime: "09:00" }, morning), nineToday);
+  assert.equal(nextRunAfter({ type: "daily", atTime: "09:00" }, nineToday), nineTomorrow, "exactly at the time rolls to tomorrow");
+  assert.equal(nextRunAfter({ type: "daily", atTime: "09:00" }, nineToday + 60000), nineTomorrow);
+  assert.equal(nextRunAfter(null, morning), null);
+  assert.equal(nextRunAfter({ type: "nope" }, morning), null);
+});
+
+test("with nothing registered the workflow engine is inert but honest", async () => {
+  const { handler } = await freshWorkflowHandler();
+  assert.deepEqual((await call(handler, "GET", "/ecom/api/state")).json.workflows, []);
+  assert.deepEqual((await call(handler, "GET", "/ecom/api/workflow/runs")).json.runs, []);
+  assert.equal((await call(handler, "POST", "/ecom/api/workflow/run", { id: "ghost" })).status, 404);
+  assert.equal((await call(handler, "POST", "/ecom/api/workflow/config", { id: "ghost", enabled: true })).status, 404);
+});
+
+test("workflow config enables, schedules, and clears the next run time", async () => {
+  const { handler, now, set } = await freshWorkflowHandler([WF_ECHO]);
+  const at = now();
+
+  const initial = (await call(handler, "GET", "/ecom/api/state")).json.workflows[0];
+  assert.deepEqual(
+    [initial.id, initial.name, initial.enabled, initial.schedule, initial.nextRunAt, initial.running],
+    ["test.echo", "测试回显", false, null, null, false]
+  );
+
+  // Enabling with no schedule leaves nothing to wait for.
+  let saved = await call(handler, "POST", "/ecom/api/workflow/config", { id: "test.echo", enabled: true });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.json.workflow.enabled, true);
+  assert.equal(saved.json.workflow.nextRunAt, null);
+
+  saved = await call(handler, "POST", "/ecom/api/workflow/config", { id: "test.echo", schedule: { type: "interval", everyMinutes: 30 } });
+  assert.equal(saved.json.workflow.nextRunAt, at + 30 * 60000, "the first run is one interval away, not immediate");
+  assert.equal(saved.json.workflow.enabled, true, "changing only the schedule keeps the enabled flag");
+
+  // Recomputing on change is what stops a stale timestamp from firing at once.
+  set(at + 10 * 60000);
+  saved = await call(handler, "POST", "/ecom/api/workflow/config", { id: "test.echo", schedule: { type: "interval", everyMinutes: 60 } });
+  assert.equal(saved.json.workflow.nextRunAt, at + 10 * 60000 + 60 * 60000);
+
+  saved = await call(handler, "POST", "/ecom/api/workflow/config", { id: "test.echo", enabled: false });
+  assert.equal(saved.json.workflow.nextRunAt, null, "a disabled workflow waits for nothing");
+
+  saved = await call(handler, "POST", "/ecom/api/workflow/config", { id: "test.echo", schedule: { type: "daily", atTime: "07:30" } });
+  assert.equal(saved.json.workflow.schedule.atTime, "07:30");
+
+  const bad = await call(handler, "POST", "/ecom/api/workflow/config", { id: "test.echo", schedule: { type: "daily", atTime: "25:00" } });
+  assert.equal(bad.status, 400);
+  assert.equal((await call(handler, "GET", "/ecom/api/state")).json.workflows[0].schedule.atTime, "07:30", "a rejected schedule changes nothing");
+});
+
+test("a manual run records its logs, summary and outcome", async () => {
+  const { handler, store } = await freshWorkflowHandler([WF_ECHO]);
+  const started = await call(handler, "POST", "/ecom/api/workflow/run", { id: "test.echo" });
+  assert.equal(started.status, 200);
+  assert.ok(started.json.runId, "the trigger answers with a run id immediately");
+
+  const run = await waitRun(handler, started.json.runId);
+  assert.equal(run.status, "success");
+  assert.equal(run.trigger, "manual");
+  assert.equal(run.summary, "完成 2 步");
+  assert.deepEqual(run.logs.map((line) => line.message), ["第一行", "第二行"]);
+  assert.deepEqual(run.logs.map((line) => line.level), ["info", "warn"]);
+  assert.ok(run.durationMs >= 0);
+  assert.equal(run.error, null);
+
+  // Guarantee, not convenience: once the run has settled it is on disk, so a
+  // reader can never catch a hole between "finished" and "persisted".
+  assert.equal((await store.readRuns()).runs.length, 1);
+
+  const list = await call(handler, "GET", "/ecom/api/workflow/runs");
+  assert.equal(list.json.runs.length, 1);
+  assert.equal(list.json.runs[0].id, run.id);
+  assert.equal(list.json.runs[0].logCount, 2);
+  assert.equal(list.json.runs[0].logs, undefined, "the history table does not carry log lines");
+
+  const view = (await call(handler, "GET", "/ecom/api/state")).json.workflows[0];
+  assert.equal(view.lastStatus, "success");
+  assert.equal(view.lastRunId, run.id);
+  assert.equal(view.running, false);
+});
+
+test("a failing workflow is recorded as failed and does not break the API", async () => {
+  const boom = {
+    id: "test.boom",
+    name: "会炸的工作流",
+    async run(ctx) {
+      ctx.log("开始");
+      throw new Error("上游返回 500");
+    }
+  };
+  const { handler } = await freshWorkflowHandler([boom]);
+  const started = await call(handler, "POST", "/ecom/api/workflow/run", { id: "test.boom" });
+  const run = await waitRun(handler, started.json.runId);
+
+  assert.equal(run.status, "failed");
+  assert.equal(run.error, "上游返回 500");
+  assert.deepEqual(run.logs.map((line) => line.level), ["info", "error"]);
+  assert.match(run.logs[1].message, /运行失败/);
+  assert.equal((await call(handler, "GET", "/ecom/api/state")).status, 200, "the handler is still serving");
+  assert.equal((await call(handler, "GET", "/ecom/api/state")).json.workflows[0].lastStatus, "failed");
+});
+
+test("a second trigger while one run is in flight is refused, not queued", async () => {
+  let release;
+  const gate = new Promise(function (resolve) { release = resolve; });
+  const slow = { id: "test.slow", name: "慢工作流", async run() { await gate; return "done"; } };
+  const { handler } = await freshWorkflowHandler([slow]);
+
+  const first = await call(handler, "POST", "/ecom/api/workflow/run", { id: "test.slow" });
+  assert.equal(first.status, 200);
+
+  const second = await call(handler, "POST", "/ecom/api/workflow/run", { id: "test.slow" });
+  assert.equal(second.status, 409);
+  assert.equal(second.json.runId, first.json.runId, "it points at the run already in flight");
+  assert.equal((await call(handler, "GET", "/ecom/api/state")).json.workflows[0].running, true);
+
+  release();
+  const run = await waitRun(handler, first.json.runId);
+  assert.equal(run.status, "success");
+});
+
+test("the scheduler fires a due workflow once, and disabling stops it", async () => {
+  const { handler, registry, store, now, set } = await freshWorkflowHandler([WF_ECHO]);
+  const scheduler = createScheduler({ store, registry, runner: handler.workflows, now });
+  const at = now();
+  await call(handler, "POST", "/ecom/api/workflow/config", {
+    id: "test.echo", enabled: true, schedule: { type: "interval", everyMinutes: 30 }
+  });
+
+  await scheduler.tick();
+  assert.equal((await call(handler, "GET", "/ecom/api/workflow/runs")).json.runs.length, 0, "not due yet");
+
+  set(at + 30 * 60000);
+  await scheduler.tick();
+  let runs = (await call(handler, "GET", "/ecom/api/workflow/runs")).json.runs;
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].trigger, "schedule");
+  assert.equal(runs[0].status, "running", "the occurrence was consumed and the run is live");
+
+  await scheduler.tick();
+  assert.equal((await call(handler, "GET", "/ecom/api/workflow/runs")).json.runs.length, 1, "the same occurrence never fires twice");
+
+  set(at + 120 * 60000);
+  await call(handler, "POST", "/ecom/api/workflow/config", { id: "test.echo", enabled: false });
+  await scheduler.tick();
+  assert.equal((await call(handler, "GET", "/ecom/api/workflow/runs")).json.runs.length, 1, "a disabled workflow does not fire");
+  scheduler.stop();
+});
+
+test("an occurrence missed while the host was down is recorded, never caught up", async () => {
+  const { handler, registry, store, now, set } = await freshWorkflowHandler([WF_ECHO]);
+  const at = now();
+  await call(handler, "POST", "/ecom/api/workflow/config", {
+    id: "test.echo", enabled: true, schedule: { type: "interval", everyMinutes: 30 }
+  });
+
+  // The host is down across the due time and starts again hours later.
+  set(at + 5 * 3600 * 1000);
+  const scheduler = createScheduler({ store, registry, runner: handler.workflows, now });
+  await scheduler.start();
+  scheduler.stop();
+
+  const runs = (await call(handler, "GET", "/ecom/api/workflow/runs")).json.runs;
+  assert.equal(runs.length, 1, "one entry for the miss, not one per missed interval");
+  assert.equal(runs[0].status, "skipped");
+  assert.match(runs[0].skippedReason, /跳过/);
+  assert.equal(handler.workflows.isRunning("test.echo"), false, "nothing was executed");
+
+  const config = (await store.read()).workflows[0];
+  assert.ok(config.nextRunAt > now(), "the schedule moved past the missed occurrence");
+  assert.equal(config.lastRunAt, undefined, "a skipped occurrence is not a run");
+});
+
+test("a schedule that fires while the previous run is still going is skipped and counted", async () => {
+  let release;
+  const gate = new Promise(function (resolve) { release = resolve; });
+  const slow = { id: "test.slow", name: "慢工作流", async run(ctx) { ctx.log("开始"); await gate; return "done"; } };
+  const { handler, registry, store, now, set } = await freshWorkflowHandler([slow]);
+  const scheduler = createScheduler({ store, registry, runner: handler.workflows, now });
+  const at = now();
+  await call(handler, "POST", "/ecom/api/workflow/config", {
+    id: "test.slow", enabled: true, schedule: { type: "interval", everyMinutes: 1 }
+  });
+
+  set(at + 60000);
+  await scheduler.tick();
+  const runId = handler.workflows.activeRun("test.slow").id;
+  assert.equal(handler.workflows.isRunning("test.slow"), true);
+
+  set(at + 120000);
+  await scheduler.tick();
+  set(at + 180000);
+  await scheduler.tick();
+  assert.equal((await call(handler, "GET", "/ecom/api/workflow/runs")).json.runs.length, 1, "no backlog of queued runs");
+
+  release();
+  const run = await waitRun(handler, runId);
+  assert.equal(run.status, "success");
+  assert.equal(run.logs.filter((line) => /跳过/.test(line.message)).length, 1, "the skipped ticks are reported once");
+  assert.match(run.logs[run.logs.length - 1].message, /2 次调度被跳过/);
+  await waitIdle(handler.workflows, "test.slow");
+  scheduler.stop();
+});
+
+test("a chatty workflow cannot grow its run record without bound", async () => {
+  const chatty = {
+    id: "test.chatty",
+    name: "话多的工作流",
+    async run(ctx) {
+      for (let i = 0; i < MAX_LOG_LINES + 20; i++) ctx.log("第 " + i + " 行");
+      return "done";
+    }
+  };
+  const { handler } = await freshWorkflowHandler([chatty]);
+  const run = await handler.workflows.run("test.chatty", "manual");
+  assert.equal(run.status, "success");
+  assert.ok(run.logs.length <= MAX_LOG_LINES + 1, "log lines are capped, got " + run.logs.length);
+  assert.match(run.logs[run.logs.length - 1].message, /上限/);
+});
+
+test("run history is capped per workflow and can be cleared", async () => {
+  const other = { id: "test.other", name: "另一个工作流", async run() { return "ok"; } };
+  const { handler, store } = await freshWorkflowHandler([WF_ECHO, other]);
+
+  for (let i = 0; i < RUN_KEEP_PER_WORKFLOW + 3; i++) await handler.workflows.run("test.echo", "manual");
+  await handler.workflows.run("test.other", "manual");
+
+  const kept = (await call(handler, "GET", "/ecom/api/workflow/runs?limit=200")).json.runs;
+  assert.equal(kept.length, RUN_KEEP_PER_WORKFLOW + 1, "the older runs of one workflow are dropped, the other workflow is untouched");
+  assert.equal((await store.readRuns()).runs.length, RUN_KEEP_PER_WORKFLOW + 1, "the file itself is trimmed, not just the response");
+
+  const filtered = (await call(handler, "GET", "/ecom/api/workflow/runs?workflowId=test.other")).json.runs;
+  assert.deepEqual(filtered.map((run) => run.workflowId), ["test.other"]);
+
+  assert.equal((await call(handler, "POST", "/ecom/api/workflow/clear", { id: "test.echo" })).json.removed, RUN_KEEP_PER_WORKFLOW);
+  assert.deepEqual((await call(handler, "GET", "/ecom/api/workflow/runs")).json.runs.map((run) => run.workflowId), ["test.other"]);
+  assert.equal((await call(handler, "POST", "/ecom/api/workflow/clear", {})).json.removed, 1, "no id clears every workflow's history");
+  assert.deepEqual((await call(handler, "GET", "/ecom/api/workflow/runs")).json.runs, []);
+  assert.equal((await call(handler, "GET", "/ecom/api/workflow/run?id=nope")).status, 404);
+});
+
+test("a run left running by a host that exited is closed out on the next mount", async () => {
+  const { handler, store } = await freshWorkflowHandler([WF_ECHO]);
+  await store.updateRuns(function (doc) {
+    doc.runs.push({
+      id: "stale", workflowId: "test.echo", workflowName: "测试回显", trigger: "schedule",
+      status: "running", startedAt: 1000, finishedAt: null, durationMs: null,
+      error: null, summary: null, skippedReason: null, logs: []
+    });
+  });
+
+  assert.equal(await handler.workflows.recoverInterrupted(), 1);
+  const run = (await call(handler, "GET", "/ecom/api/workflow/run?id=stale")).json.run;
+  assert.equal(run.status, "failed");
+  assert.match(run.error, /退出/);
+  assert.equal(await handler.workflows.recoverInterrupted(), 0, "nothing left to close");
+});
+
+test("the provider a workflow sees is wrapped by the shared generation cap", async () => {
+  let slots = 0;
+  let contextKeys = null;
+  const provider = {
+    name: "stub",
+    async generate() { return [{ buffer: PNG_BYTES, mimeType: "image/png" }]; }
+  };
+  const generates = {
+    id: "test.gen",
+    name: "出图工作流",
+    async run(ctx) {
+      contextKeys = Object.keys(ctx);
+      await ctx.provider.generate({ prompt: "x" });
+      return "已生成";
+    }
+  };
+  const root = await mkdtemp(join(tmpdir(), "ecom-wf-"));
+  const runner = createWorkflowRunner({
+    store: createStore(root),
+    registry: createRegistry([generates]),
+    provider: provider,
+    withGeneration: function (fn) { slots++; return Promise.resolve().then(fn); }
+  });
+
+  const run = await runner.run("test.gen", "manual");
+  assert.equal(run.status, "success");
+  assert.equal(run.summary, "已生成");
+  assert.equal(slots, 1, "the provider call ran through the shared semaphore");
+  assert.ok(contextKeys.indexOf("provider") >= 0);
+  // Deliberately absent: nesting the semaphore (an outer slot around a guarded
+  // provider call) lets two workflows hold one slot each while each waits for a
+  // second, which deadlocks against a cap of 2.
+  assert.equal(contextKeys.indexOf("withGeneration"), -1, "withGeneration must not be reachable from a workflow");
+});
+
+test("workflow config and history survive reopening the store", async () => {
+  const { handler, root, now } = await freshWorkflowHandler([WF_ECHO]);
+  await call(handler, "POST", "/ecom/api/workflow/config", {
+    id: "test.echo", enabled: true, schedule: { type: "daily", atTime: "07:30" }
+  });
+  await handler.workflows.run("test.echo", "manual");
+
+  const reopened = createHandler(createStore(root), createLocalProvider(), {
+    registry: createRegistry([WF_ECHO]),
+    now: now
+  });
+  const view = (await call(reopened, "GET", "/ecom/api/state")).json.workflows[0];
+  assert.equal(view.enabled, true);
+  assert.deepEqual(view.schedule, { type: "daily", atTime: "07:30" });
+  assert.equal(view.lastStatus, "success");
+
+  const runs = (await call(reopened, "GET", "/ecom/api/workflow/runs")).json.runs;
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].status, "success");
+  assert.equal(runs[0].workflowName, "测试回显");
 });
