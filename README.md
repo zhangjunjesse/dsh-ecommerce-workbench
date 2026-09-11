@@ -4,7 +4,8 @@ A DSH plugin that renders a local e-commerce design workbench as the profile's
 primary UI, so opening DSH lands on the workbench. Ships **印花管理** (印花提取 +
 印花二创, real generation) and **T恤二创** (apply a print onto a T恤, real
 generation) as the print pipeline, plus **工作流** (schedule and trigger
-automation, and read its run logs) directly beneath 印花二创; below a divider sit
+automation, and read its run logs — it ships with **印花流水线**, the four-step
+batch pipeline, already registered) directly beneath 印花二创; below a divider sit
 the non-pipeline items: **通用工作台** (free-form prompt + reference images →
 outputs, the daily driver), **T恤管理** (upload and manage multiple reference
 photos per T恤, no generation), **提示词管理** (saved prompts, pickable from
@@ -158,6 +159,104 @@ already in flight), `GET /ecom/api/workflow/runs`,
 also returns `workflows`: one entry per registered definition, merged from the
 registry (what exists in code) and the store (what the user changed about it),
 plus its live running state.
+
+## 印花流水线
+
+The workbench's first real workflow (`print.pipeline`, `lib/printPipeline.js`): a
+**group of reference screenshots** goes in, finished products come out, with no
+per-step button pressing. Open 工作流 → 「分组与成品」.
+
+```
+一组参考图（同一商品的多个角度截图）
+ ① 提取印花   the whole group is passed to the extractor together      → 1 张
+ ② 印花二创   every 「印花二创-N」 prompt runs once, 2 outputs each      → 4 × 2 = 8 张
+ ③ T恤融合    every re-created print × every selected 款式 (T恤 photo)  → 8 × 3 = 24 张
+ ④ 换装裂变   every composite, 2 passes of 4, [random 场景图, composite] → 24 × 8 = 192 张
+```
+
+**That is 1 + 8 + 24 + 192 = 225 provider calls per group**, roughly two hours at
+the host's concurrency of 2. Every number below exists because of that one.
+
+**Intake: upload or folder, one place.** The inbox is
+`$DSH_HOME/ecommerce-workbench/workflow-inbox/print.pipeline/`, and **one
+immediate subfolder is one group**. 「上传参考图」 writes into that same
+directory, so the two paths the user described converge on one source of truth
+and the UI simply reads the directory. Images lying **loose in the inbox root**
+are gathered into a single 「未分组」 group rather than each becoming a group of
+one: a single-image group is legal, so the alternative would silently turn three
+angles of one product into three separate 225-call runs, each extracting a print
+from a third of the information. The estimate warns about that bucket instead,
+and the fix — move them into a subfolder — stays with the user.
+
+**The T恤 and its 款式.** The group stores which T恤 it runs against; the
+default is the first T恤 and **all** of its photos, because that is what 「所有款式」
+means here: one photo is one 款式 (the existing T恤二创 model, which also renders
+one composite per photo). On this machine that is one T恤 with three photos, which
+is exactly the 3 × 8 = 24 the feature was specified with. A stored selection that
+no longer matches the T恤 (a photo was deleted, or the T恤 was switched) falls
+back to the default *and says so*, rather than degrading to "generate nothing" —
+the fallback is what the user would have got had they never picked.
+
+**Prompts come from 提示词管理, matched by exact name**: `印花提取`,
+`印花二创-1…N` (ordered by the numeric suffix, not alphabetically),
+`印花T恤融合`, `换装+裂变`. Missing ones are not silently skipped: the estimate
+lists each one, and the steps that cannot run report 0 in the plan. Only 提取 has
+a built-in fallback; the other three are required for their step.
+
+**One group per run.** The pipeline deliberately does not drain the whole queue:
+one mistake, or one upstream hiccup, would otherwise cost the queue's worth of
+credits instead of one group's. The scheduler's job is to chew through the queue
+one group at a time — set 周期 to e.g. 每 1 小时 and approved groups are processed
+in order, one per run.
+
+**Approval is what the scheduler consumes.** A scheduled run has nobody to show
+an estimate to, so it only picks up groups that were explicitly **确认排队**d;
+with nothing approved it does nothing and says so. A *manual* run names its
+target outright, so it needs no approval. Re-approving a finished group re-queues
+it (otherwise approving after adding more screenshots would silently do nothing).
+
+**The cost is shown before it is spent, and capped.** 「估算并运行」 fetches
+`GET /ecom/api/workflow/estimate?groupKey=…` and shows the exact call counts per
+step, which prompts/T恤/scene pool it will use, what is already done, and every
+warning — then the user confirms. A run re-checks the same plan against
+`ECOM_WORKFLOW_MAX_CALLS` (default **400**, i.e. one group plus headroom) and
+refuses before its first call. The ceiling is also enforced **stage by stage
+against what is actually about to be sent**, not only against the up-front
+estimate: an optimistic estimate would otherwise be the one thing that could talk
+the cap out of a cap. A forced re-run is checked against the full plan, since it
+ignores what already exists.
+
+**Re-running resumes; it never pays twice.** Every artefact is stamped with
+`workflowId` + `groupKey` (+ the keys it derived from), so a later run can see
+what already exists and generate only what is missing. That index is derived from
+the artefacts themselves — there is no separate progress ledger to fall out of
+step with the files. Interrupt an hour-long run, run it again, and it continues
+where it stopped; run it again when it is complete and it costs nothing at all.
+「强制重跑」 is the explicit way to ask for a second full pass, and it writes new
+rows rather than overwriting the ones already paid for.
+
+**Where the products go.** Steps 1–3 write into the normal feeds (印花原图库 /
+二创印花 / T恤二创结果) stamped with `runId` + `groupKey`, so the artefacts are
+usable in the rest of the workbench exactly like hand-made ones. Step 4 writes
+into a **separate product library** (`workflow-outputs.json`,
+`GET /ecom/api/workflow/outputs`). That separation is not tidiness: 场景图管理 is
+the *reference* pool this step draws its random scene from, so putting the
+outputs back into it would mean later runs picking the pipeline's own products as
+scene references, degrading every generation after the first. The 「分组与成品」
+panel shows all four stages and can delete any of them (steps 1–3 delete through
+their own modules' records, step 4 through the product library).
+
+**Failure semantics.** Each item is caught independently and persisted the moment
+it succeeds, so one bad call never discards the rest of the batch. A run that had
+any failures is reported as **失败** (a green 成功 would hide it) with a summary
+saying what was kept, and the group stays in the queue — the next run resumes.
+Nothing is ever deleted to "clean up" a failure.
+
+Env knobs: `ECOM_WORKFLOW_MAX_CALLS` (ceiling per run), `ECOM_PIPELINE_CONCURRENCY`
+(calls this workflow keeps in flight; the host's global cap still applies),
+`ECOM_PIPELINE_RECREATE_OUTPUTS` (2), `ECOM_PIPELINE_SCENE_PASSES` (2),
+`ECOM_PIPELINE_SCENE_OUTPUTS` (4). The last three change the pipeline's shape, so
+they exist to dial the cost down without a code change.
 
 ### Why the store now writes atomically
 
@@ -393,18 +492,21 @@ selection click.
 | File | Half | Role |
 |---|---|---|
 | `lib/index.js` | Host | Serves the `/ecom/api` JSON API (state / extract / recreate / tshirtRecreate / importFolder / importFiles / generate / scene/add / delete / clear / file / job / jobs / tshirt / prompt / workflow/*) and picks the image provider (ToAPIs, else local passthrough). |
-| `lib/store.js` | Host | Durable store: `state.json` metadata + `workflow-runs.json` run history + `files/<id>.<ext>` image bytes under `$DSH_HOME/ecommerce-workbench`. Both documents are replaced atomically (temp file + rename) so a concurrent read can never see a half-written file. |
+| `lib/store.js` | Host | Durable store: `state.json` metadata + `workflow-runs.json` run history + `workflow-outputs.json` product library + `files/<id>.<ext>` image bytes under `$DSH_HOME/ecommerce-workbench`. Every document is replaced atomically (temp file + rename) so a concurrent read can never see a half-written file. |
 | `lib/imageSize.js` | Host | Dependency-free image header reader (PNG/GIF/JPEG/WebP). Returns `null` rather than guessing, because a guessed ratio is what stretches a photo. |
 | `lib/provider.js` | Host | Provider seam. `createToapisProvider()` shells out to `toapis-gpt-image-2/scripts/generate.py` (edit mode) for real extraction/二创/T恤二创 (`extract`/`recreate`/`applyToTshirt`); `createLocalProvider()` is a no-network passthrough fallback. |
-| `lib/workflows.js` | Host | The workflow registry: the one place a workflow is declared, its definition validated at mount, and — by design — an **empty** built-in list. Holds no state. |
-| `lib/workflowRunner.js` | Host | Executes a workflow and records every attempt: run records, log capture and caps, one-run-per-workflow, history retention, crash recovery, and the concurrency-guarded provider a workflow is allowed to see. |
+| `lib/workflows.js` | Host | The workflow registry: the one place a workflow is declared and validated at mount. Holds no state. |
+| `lib/workflowRunner.js` | Host | Executes a workflow and records every attempt: run records, log capture and caps, one-run-per-workflow, history retention, crash recovery, run params, and the concurrency-guarded provider a workflow is allowed to see. |
 | `lib/scheduler.js` | Host | Schedule shapes and arithmetic (interval / daily), the in-process tick, and missed-occurrence detection. Pure time logic plus a timer — no workflow knowledge. |
-| `lib/client.js` | Client | Registers the workbench as a `conversation.view` tab with React; all UI/state calls the host API. No image processing here. |
+| `lib/printPipeline.js` | Host | 印花流水线: the inbox scan and grouping, the T恤/prompt resolution, the four-step pipeline, the cost estimate, and resume-from-artefacts. The one workflow-specific module; keeping it out of the engine is what lets the engine stay generic. |
+| `lib/client.js` | Client | Registers the workbench as a `conversation.view` tab with React; all UI/state calls the host API. Also carries the pipeline's own panels (groups, estimate, four-stage results), found by workflow id. No image processing here. |
 | `cordis.patch.yml` | Patch | Inserts the `ecommerce-workbench` bundle entry. |
 | `test/host-api.test.js` | Test | Drives the real handler + store through the full extract → recreate → delete → clear lifecycle (with the local provider), plus the workflow engine end to end: config, manual runs, failure, single-flight, scheduling, missed occurrences, retention, crash recovery, and persistence. |
-| `test/client-render.test.js` | Test | Builds the real client component tree with a minimal React stand-in, covering the 工作流 empty state, cards, schedule controls, run statuses and the log panel — the parts a syntax check cannot validate. |
+| `test/print-pipeline.test.js` | Test | Drives 印花流水线 through the real handler with a counting provider stub: the 225-call arithmetic, resume-instead-of-repay, the hard ceiling, missing-prompt reporting, the loose-files bucket, upload collision and traversal, approval gating, product deletion, and that deleting a group keeps what it produced. |
+| `test/client-render.test.js` | Test | Builds the real client component tree with a minimal React stand-in, covering the 工作流 empty state, cards, schedule controls, run statuses, the log panel, the pipeline panel (groups, estimate, all four result stages) and the nav/view alignment invariant — the parts a syntax check cannot validate. |
 | `docs/DECISION-0001-*.md` | Decision | Owning decision record for the workbench-as-view-tab design. |
 | `docs/DECISION-0002-*.md` | Decision | Owning decision record for the workflow engine (why workflows are code, why schedules are two shapes, why misses are skipped). |
+| `docs/DECISION-0003-*.md` | Decision | Owning decision record for 印花流水线 (why one group per run, why resume is derived from artefacts, why its products do not go back into the scene pool). |
 
 ## Wiring
 
@@ -459,10 +561,10 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 
 ## Verify
 
-- Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js`
-- Tests: `node --test "test/*.test.js"` (**70/70 pass**). (The quoted glob is
+- Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js && node --check lib/printPipeline.js`
+- Tests: `node --test "test/*.test.js"` (**85/85 pass**). (The quoted glob is
   required: `node --test test/` is not usable on this Node/Windows combination —
-  it tries to load the directory as a module. The two files can also be listed
+  it tries to load the directory as a module. The three files can also be listed
   explicitly.)
   - `test/host-api.test.js` (67) covers the original lifecycle — timing-based
     concurrency proofs, partial-failure proofs (one flaky item still leaves the
@@ -485,11 +587,30 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     workflow's provider calls go through the shared semaphore while
     `withGeneration` is unreachable, and that config + history survive reopening
     the store.
-  - `test/client-render.test.js` (3) builds the real client component tree with
+  - `test/print-pipeline.test.js` (14) drives 印花流水线 through the real handler
+    with a counting stub provider, so a run's real cost is asserted exactly:
+    **一组的 225 次调用** (1 extract + 8 recreate + 24 T恤 + 192 场景, from 4
+    prompts × 2, 3 款式, 2 passes × 4), that a second run costs nothing, that a
+    run with part of the last stage removed regenerates only the missing items,
+    that a forced run pays for a second full pass without discarding the first,
+    that the ceiling refuses *before* any call and the same group passes once it
+    is raised, that missing/renamed prompts are reported per step, the loose-files
+    bucket and its warning, upload collision naming and `../` traversal, approval
+    gating a scheduled run (and a manual one needing none), a finished group
+    leaving the queue and re-approval re-queuing it, listing/removing products
+    with their bytes, deleting a group while keeping its products, and a stale
+    T恤 selection falling back to every photo.
+  - `test/client-render.test.js` (4) builds the real client component tree with
     a minimal React stand-in: the 工作流 empty state, the cards/controls/log
-    panel with every run status, and that the nav, `viewNames` and `viewEls`
-    lists cannot drift apart (a mismatch shows the wrong view under a nav label,
+    panel with every run status, the pipeline panel (group list, the 225-call
+    estimate, warnings, and all four result stages — asserted down to the image
+    `src` each stage renders), and that the nav, `viewNames` and `viewEls` lists
+    cannot drift apart (a mismatch shows the wrong view under a nav label,
     silently and only after the insertion point).
+- The estimate was also run against this machine's **real** store contents
+  (10 prompts, 1 T恤 with 3 photos, 228 scenes) in a throwaway copy: it resolves
+  all four prompt names, selects all 3 款式, and reports 1 + 8 + 24 + 192 = 225
+  calls with **zero warnings** and nothing generated.
 - Both test files were run repeatedly (30× host, 8× both) to confirm the suite
   is stable. Two races that used to flake are fixed rather than tolerated: the
   generation jobs published `done` before awaiting their `store.update`, and

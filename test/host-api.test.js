@@ -1148,9 +1148,13 @@ const WF_ECHO = {
   }
 };
 
-test("createRegistry validates definitions up front, and the built-in set is empty", () => {
-  assert.equal(createRegistry().size, 0);
-  assert.equal(createRegistry(BUILT_IN_WORKFLOWS).size, 0, "工作流引擎不内置任何工作流");
+test("createRegistry validates definitions up front and accepts an empty set", () => {
+  // The engine ships no workflow of its own: the built-ins are ordinary
+  // definitions like any other, and an empty registry is still a valid one (the
+  // workflow tests below drive the engine through exactly that).
+  assert.equal(createRegistry([]).size, 0);
+  assert.equal(createRegistry().size, BUILT_IN_WORKFLOWS.length);
+  assert.ok(BUILT_IN_WORKFLOWS.length >= 1, "印花流水线 is registered");
   assert.throws(() => createRegistry([{ id: "x", name: "n" }]), /needs a run/);
   assert.throws(() => createRegistry([{ id: "bad id", name: "n", async run() {} }]), /id must match/);
   assert.throws(() => createRegistry([{ id: "x", name: "   ", async run() {} }]), /non-empty name/);

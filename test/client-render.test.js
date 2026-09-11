@@ -59,7 +59,9 @@ function render(node, depth) {
   if (Array.isArray(node)) return node.map(function (child) { return render(child, depth + 1); });
   if (typeof node === "string" || typeof node === "number") return node;
   if (typeof node.type === "function") return render(node.type(node.props || {}), depth + 1);
-  return { type: node.type, children: render(node.props && node.props.children, depth + 1) };
+  // Props are kept (not just children), so a test can assert on `src` and other
+  // attributes rather than only on the text a user would read.
+  return { type: node.type, props: node.props, children: render(node.props && node.props.children, depth + 1) };
 }
 
 /** Every string in the tree, in render order — what a user would actually read. */
@@ -202,4 +204,124 @@ test("the workbench nav and its view list cannot drift apart", () => {
   // 工作流 belongs directly under T恤二创, in the generation group.
   assert.equal(viewNames[viewNames.indexOf("工作流") - 1], "T恤二创");
   assert.ok(navLabels("primaryNav").indexOf("工作流") !== -1, "工作流 must be in the primary nav group");
+});
+
+test("the pipeline panel renders its groups, estimate and four result stages", () => {
+  // 印花流水线's own panel — the queue, the cost estimate and the product view —
+  // is the only place its 225-call cost is shown before it is spent, so it gets
+  // the same treatment as the rest of the client: the real component tree, with
+  // its internal state seeded, rather than trusting a syntax check.
+  const now = Date.now();
+  const pipelineWorkflow = {
+    id: "print.pipeline", name: "印花流水线", description: "一组参考图 → 四步",
+    enabled: true, schedule: null, nextRunAt: null,
+    lastRunAt: now - 1000, lastRunId: "run-1", lastStatus: "success", running: false, runId: null
+  };
+  const estimate = {
+    workflowId: "print.pipeline",
+    group: { key: "商品A", name: "商品A", source: "inbox", imageCount: 3, images: ["a.png", "b.png", "c.png"] },
+    prompts: {
+      extract: { name: "印花提取", found: true },
+      recreate: [{ name: "印花二创-1", outputs: 2 }, { name: "印花二创-2", outputs: 2 }],
+      tshirt: { name: "印花T恤融合", found: true },
+      scene: { name: "换装+裂变", found: true }
+    },
+    tshirt: { id: "t1", name: "测试T恤", photos: ["p1", "p2", "p3"], selected: ["p1", "p2", "p3"] },
+    scenes: { available: 228 },
+    plan: { extract: 1, recreate: 8, tshirt: 24, scene: 192, total: 225 },
+    pending: { extract: 1, recreate: 8, tshirt: 24, scene: 192, total: 225, printsAvailable: 0 },
+    warnings: ["该分组之前选的款式已经不在这件T恤里了，本次按全部 3 个款式处理。"],
+    cap: { max: 400, exceeded: false },
+    settings: { recreateOutputs: 2, scenePasses: 2, sceneOutputs: 4, concurrency: 2 }
+  };
+  const demo = {
+    workflows: [pipelineWorkflow],
+    runs: [],
+    run: null,
+    groups: [
+      { key: "商品A", name: "商品A", source: "inbox", images: ["a.png", "b.png"], imageCount: 2, status: "done", approvedAt: now, tshirtId: null, tshirtImages: null, counts: { extract: 1, recreate: 8, tshirt: 24, scene: 192 }, failures: 0, lastRunAt: now, lastRunId: "run-1", updatedAt: now },
+      { key: "商品B", name: "商品B", source: "loose", images: ["c.png"], imageCount: 1, status: "pending", approvedAt: null, tshirtId: null, tshirtImages: null, counts: null, failures: 0, lastRunAt: null, lastRunId: null, updatedAt: null }
+    ],
+    results: { key: "商品A", total: 2, outputs: [{ id: "o1", file: "out-1.png" }, { id: "o2", file: "out-2.png" }] },
+    library: [{ id: "l1", file: "print.png", groupKey: "商品A" }],
+    recreations: [{ id: "r1", groupKey: "商品A", prints: [{ id: "r1p1", file: "re-1.png" }, { id: "r1p2", file: "re-2.png" }] }],
+    tshirtRecreations: [{ id: "t1r", groupKey: "商品A", prints: [{ id: "t1p1", file: "comp-1.png" }] }]
+  };
+
+  const patched = CLIENT_SOURCE
+    .replace("var workflowsState = React.useState([]);", "var workflowsState = React.useState(__DEMO_WORKFLOWS__);")
+    .replace("var libraryState = React.useState([]);", "var libraryState = React.useState(__DEMO_LIBRARY__);")
+    .replace("var recreationsState = React.useState([]);", "var recreationsState = React.useState(__DEMO_RECREATIONS__);")
+    .replace("var tshirtRecreationsState = React.useState([]);", "var tshirtRecreationsState = React.useState(__DEMO_TSHIRT_RECREATIONS__);")
+    .replace("var groupsOpenState = React.useState(null);", "var groupsOpenState = React.useState(__DEMO_WORKFLOWS__[0].id);")
+    .replace("var groupsState = React.useState([]);", "var groupsState = React.useState(__DEMO_GROUPS__);")
+    .replace("var inboxState = React.useState(\"\");", "var inboxState = React.useState(__DEMO_INBOX__);")
+    .replace("var estimateState = React.useState(null);", "var estimateState = React.useState(__DEMO_ESTIMATE__);")
+    .replace("var resultsState = React.useState(null);", "var resultsState = React.useState(__DEMO_RESULTS__);");
+  assert.notEqual(patched, CLIENT_SOURCE, "the in-memory seed no longer applies — update it");
+  assert.match(patched, /useState\(__DEMO_GROUPS__\)/);
+
+  const fakeWindow = { __ModuleLoader__: { load: function (mod) { captured = mod; } } };
+  let captured = null;
+  const react = makeReactStub();
+  function shim(name) {
+    if (name === "react") return react;
+    throw new Error("unexpected require(" + name + ")");
+  }
+  const run = new Function(
+    "window", "require",
+    "__DEMO_WORKFLOWS__", "__DEMO_RUNS__", "__DEMO_RUN__", "__DEMO_GROUPS__", "__DEMO_INBOX__",
+    "__DEMO_ESTIMATE__", "__DEMO_RESULTS__", "__DEMO_LIBRARY__", "__DEMO_RECREATIONS__", "__DEMO_TSHIRT_RECREATIONS__",
+    patched
+  );
+  run(fakeWindow, shim, demo.workflows, demo.runs, demo.run, demo.groups, "E:/inbox/print.pipeline",
+    estimate, demo.results, demo.library, demo.recreations, demo.tshirtRecreations);
+
+  let view = null;
+  const slots = {
+    inject: function (name, fn) { fn(); },
+    register: function (opts, comp) { view = comp; return function () {}; }
+  };
+  captured.factory(shim).apply({ get: function (key) { return key === "slots" ? slots : null; } });
+  const text = collectText(render(view({}), 0), []);
+
+  const missing = [
+    ["参考图分组", "the panel heading"],
+    ["收图目录", "where to drop folders by hand"],
+    ["商品A", "an inbox group"],
+    ["商品B", "a second group"],
+    ["已完成", "a finished group's status"],
+    ["未确认", "an unapproved group's status"],
+    ["估算并运行", "the estimate entry point"],
+    ["确认排队", "handing a group to the scheduler"],
+    ["合计 225 次生成调用", "the cost, before it is spent"],
+    ["本次还需 225 次", "what this run would actually do"],
+    ["上限 400 次", "the ceiling it will be checked against"],
+    ["已经不在这件T恤里", "the stale-selection warning"],
+    ["① 提取印花", "stage 1 results"],
+    ["② 二创印花", "stage 2 results"],
+    ["③ 二创T恤", "stage 3 results"],
+    ["④ 场景成片", "stage 4 results"],
+    ["与场景图管理的参考图池分开", "why the products are not scene references"],
+    ["前三步的产物同时也进了", "where the intermediates can be reused"]
+  ].filter(function (entry) {
+    return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
+  }).map(function (entry) { return entry[1]; });
+  assert.deepEqual(missing, [], "the pipeline panel is missing something the user needs");
+
+  // The four stages must actually render their own artefacts. Image file names
+  // live in `src`, not in text, so the tree is walked rather than the text.
+  function collectImgSrcs(node, out) {
+    const found = out || [];
+    if (node === null || node === undefined || typeof node !== "object") return found;
+    if (Array.isArray(node)) { node.forEach(function (child) { collectImgSrcs(child, found); }); return found; }
+    if (node.type === "img" && node.props && node.props.src) found.push(String(node.props.src));
+    collectImgSrcs(node.children, found);
+    return found;
+  }
+  const srcs = collectImgSrcs(render(view({}), 0), []);
+  ["print.png", "re-1.png", "comp-1.png", "out-1.png"].forEach(function (file) {
+    assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
+      "stage result " + file + " is not rendered (got " + srcs.length + " images)");
+  });
 });
