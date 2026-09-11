@@ -28,7 +28,9 @@ const { join } = require("node:path");
 const CLIENT_SOURCE = readFileSync(join(__dirname, "..", "lib", "client.js"), "utf8");
 
 /** The smallest React that can build a tree: elements, and hooks that just return. */
-function makeReactStub() {
+function makeReactStub(options) {
+  const settings = options || {};
+  const stateCalls = [];
   return {
     Fragment: "Fragment",
     createElement: function (type, props) {
@@ -38,17 +40,26 @@ function makeReactStub() {
       else if (children.length > 1) merged.children = children;
       return { type: type, props: merged };
     },
-    // No re-rendering, so a setter that does nothing is enough; the initial
-    // value is what the single pass renders.
+    // There is no re-render, so the initial value is what the single pass draws —
+    // but every setter call is recorded, which is how a test can assert what the
+    // mount-time hydration actually loaded.
     useState: function (initial) {
-      return [typeof initial === "function" ? initial() : initial, function () {}];
+      return [typeof initial === "function" ? initial() : initial, function (next) { stateCalls.push(next); }];
     },
-    useEffect: function () {},
+    // Effects are skipped by default (one render pass is the test); a test that
+    // needs to exercise the mount path opts in. A throwing effect is swallowed:
+    // effects here assume a real browser, and the assertions that matter are on
+    // the state setters the effect calls before it could ever reach that point.
+    useEffect: function (fn) {
+      if (settings.runEffects !== true) return;
+      try { fn(); } catch (error) { /* browser-only effect body */ }
+    },
     useLayoutEffect: function () {},
     useRef: function (initial) { return { current: initial === undefined ? null : initial }; },
     useMemo: function (fn) { return fn(); },
     useCallback: function (fn) { return fn; },
-    createContext: function () { return {}; }
+    createContext: function () { return {}; },
+    stateCalls: stateCalls
   };
 }
 
@@ -77,19 +88,35 @@ function collectText(node, out) {
 /**
  * Evaluate the client bundle, run its `apply`, and return the view component it
  * registers.
+ *
  * @param {string} source - client source (possibly patched in memory).
- * @param {object} demo - values bound to the `__DEMO_*` names the patch inserts.
+ * @param {object} demo - values bound to the `__DEMO_*` names a patch inserts;
+ *   the keys ARE the parameter names, so each test declares only what it seeds.
+ * @param {object} [options]
+ * @param {boolean} [options.runEffects] - run `useEffect` bodies, which is what
+ *   exercises the mount-time state load.
+ * @param {Function} [options.fetch] - replaces `fetch` for apiGet/apiPost.
+ * @returns {{view: Function, stateCalls: any[]}} the registered view and every
+ *   value any `useState` setter was called with.
  */
-function loadClient(source, demo) {
+function loadClient(source, demo, options) {
+  const settings = options || {};
+  const react = makeReactStub({ runEffects: settings.runEffects === true });
+  const demoNames = Object.keys(demo || {});
+  const demoValues = demoNames.map(function (name) { return demo[name]; });
+  const fetchImpl = settings.fetch || function () {
+    return Promise.resolve({ json: function () { return Promise.resolve({ ok: true }); } });
+  };
   let captured = null;
   const fakeWindow = { __ModuleLoader__: { load: function (mod) { captured = mod; } } };
-  const react = makeReactStub();
   function shim(name) {
     if (name === "react") return react;
     throw new Error("unexpected require(" + name + ")");
   }
-  const run = new Function("window", "require", "__DEMO_WORKFLOWS__", "__DEMO_RUNS__", "__DEMO_RUN__", source);
-  run(fakeWindow, shim, demo.workflows, demo.runs, demo.run);
+  // Function(...) builds the same function as `new Function(...)` without the
+  // `new`, so the parameter list can be spread.
+  const factory = Function.apply(null, ["window", "require", "fetch"].concat(demoNames, [source]));
+  factory.apply(null, [fakeWindow, shim, fetchImpl].concat(demoValues));
 
   assert.ok(captured, "the bundle did not call window.__ModuleLoader__.load");
   const mod = captured.factory(shim);
@@ -101,16 +128,18 @@ function loadClient(source, demo) {
   };
   mod.apply({ get: function (key) { return key === "slots" ? slots : null; } });
   assert.equal(typeof registered, "function", "the workbench registered no conversation view");
-  return registered;
+  return { view: registered, stateCalls: react.stateCalls };
 }
 
 /** Render the whole workbench once and return every string it produced. */
-function renderWorkbench(source, demo) {
-  return collectText(render(loadClient(source, demo)({}), 0), []);
+function renderWorkbench(source, demo, options) {
+  return collectText(render(loadClient(source, demo, options).view({}), 0), []);
 }
 
 test("with nothing registered, 工作流 renders an honest empty state", () => {
-  const text = renderWorkbench(CLIENT_SOURCE, { workflows: [], runs: [], run: null }).join("|");
+  const text = renderWorkbench(CLIENT_SOURCE, {
+    __DEMO_WORKFLOWS__: [], __DEMO_RUNS__: [], __DEMO_RUN__: null
+  }).join("|");
   assert.match(text, /还没有已注册的工作流/);
   // The empty state must say where a workflow comes from, not just that none exist.
   assert.match(text, /lib\/workflows\.js/);
@@ -162,7 +191,11 @@ test("workflow cards render their schedule, controls and every run status", () =
   assert.notEqual(patched, CLIENT_SOURCE, "the in-memory seed no longer applies — update it");
   assert.match(patched, /useState\(__DEMO_WORKFLOWS__\)/);
 
-  const text = renderWorkbench(patched, demo);
+  const text = renderWorkbench(patched, {
+    __DEMO_WORKFLOWS__: demo.workflows,
+    __DEMO_RUNS__: demo.runs,
+    __DEMO_RUN__: demo.run
+  });
   const missing = [
     ["示例同步", "a workflow's name"],
     ["把二创印花同步到外部目录", "its description"],
@@ -261,28 +294,19 @@ test("the pipeline panel renders its groups, estimate and four result stages", (
   assert.notEqual(patched, CLIENT_SOURCE, "the in-memory seed no longer applies — update it");
   assert.match(patched, /useState\(__DEMO_GROUPS__\)/);
 
-  const fakeWindow = { __ModuleLoader__: { load: function (mod) { captured = mod; } } };
-  let captured = null;
-  const react = makeReactStub();
-  function shim(name) {
-    if (name === "react") return react;
-    throw new Error("unexpected require(" + name + ")");
-  }
-  const run = new Function(
-    "window", "require",
-    "__DEMO_WORKFLOWS__", "__DEMO_RUNS__", "__DEMO_RUN__", "__DEMO_GROUPS__", "__DEMO_INBOX__",
-    "__DEMO_ESTIMATE__", "__DEMO_RESULTS__", "__DEMO_LIBRARY__", "__DEMO_RECREATIONS__", "__DEMO_TSHIRT_RECREATIONS__",
-    patched
-  );
-  run(fakeWindow, shim, demo.workflows, demo.runs, demo.run, demo.groups, "E:/inbox/print.pipeline",
-    estimate, demo.results, demo.library, demo.recreations, demo.tshirtRecreations);
-
-  let view = null;
-  const slots = {
-    inject: function (name, fn) { fn(); },
-    register: function (opts, comp) { view = comp; return function () {}; }
-  };
-  captured.factory(shim).apply({ get: function (key) { return key === "slots" ? slots : null; } });
+  const loaded = loadClient(patched, {
+    __DEMO_WORKFLOWS__: demo.workflows,
+    __DEMO_RUNS__: demo.runs,
+    __DEMO_RUN__: demo.run,
+    __DEMO_GROUPS__: demo.groups,
+    __DEMO_INBOX__: "E:/inbox/print.pipeline",
+    __DEMO_ESTIMATE__: estimate,
+    __DEMO_RESULTS__: demo.results,
+    __DEMO_LIBRARY__: demo.library,
+    __DEMO_RECREATIONS__: demo.recreations,
+    __DEMO_TSHIRT_RECREATIONS__: demo.tshirtRecreations
+  });
+  const view = loaded.view;
   const text = collectText(render(view({}), 0), []);
 
   const missing = [
@@ -323,5 +347,49 @@ test("the pipeline panel renders its groups, estimate and four result stages", (
   ["print.png", "re-1.png", "comp-1.png", "out-1.png"].forEach(function (file) {
     assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
       "stage result " + file + " is not rendered (got " + srcs.length + " images)");
+  });
+});
+
+test("the mount-time state load hydrates every module, 工作流 included", async () => {
+  // The bug this guards, and why it needs a behavioural test: the mount path
+  // carried its own copy of the field list, so the module added to the *other*
+  // copy was never loaded on a page load. The host answered perfectly, the
+  // bundle was current, and 工作流 still rendered as empty — a render-only test
+  // cannot see that, because the render is fine; the load is what was wrong.
+  const state = {
+    ok: true,
+    library: [{ id: "l1", file: "a.png" }],
+    recreations: [],
+    tshirts: [],
+    tshirtRecreations: [],
+    prompts: [{ id: "p1", name: "印花提取", text: "x" }],
+    generations: [],
+    scenes: [{ id: "s1", file: "b.png" }],
+    workflows: [{ id: "print.pipeline", name: "印花流水线", enabled: false, running: false }]
+  };
+  const loaded = loadClient(CLIENT_SOURCE, {}, {
+    runEffects: true,
+    fetch: function () {
+      return Promise.resolve({ json: function () { return Promise.resolve(state); } });
+    }
+  });
+  render(loaded.view({}), 0);
+  // apiGet resolves on a microtask; let the hydration land before asserting.
+  await new Promise(function (resolve) { setTimeout(resolve, 0); });
+
+  function hydrated(id) {
+    return loaded.stateCalls.some(function (value) {
+      return Array.isArray(value) && value.length > 0 && value[0] && value[0].id === id;
+    });
+  }
+  assert.equal(hydrated("print.pipeline"), true, "the mount-time load must include 工作流 — an empty list here means the workbench renders that module as empty no matter what the host returns");
+  assert.equal(hydrated("s1"), true, "and the other modules still load");
+  assert.equal(hydrated("l1"), true);
+
+  // The hydration list lives in exactly one place. Two copies is what caused the
+  // bug above, and a list that must be kept in sync in two places will not be.
+  ["setLibrary(state.library", "setScenes(state.scenes", "setWorkflows(state.workflows"].forEach(function (marker) {
+    const occurrences = CLIENT_SOURCE.split(marker + " || [])").length - 1;
+    assert.equal(occurrences, 1, marker + " appears " + occurrences + " times — the hydration list has been duplicated");
   });
 });
