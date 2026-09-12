@@ -408,3 +408,65 @@ test("a group whose T恤 selection is stale still runs against the photos that e
   assert.equal(run.status, "success", run.error || "");
   assert.equal((await store.read()).tshirtRecreations.length, 24);
 });
+
+// ---------------------------------------------------------------------------
+// 工作流参数 — the two knobs that decide the shape (and the cost) of step 4.
+// ---------------------------------------------------------------------------
+
+test("settings drive step 4: how many scenes, and how many shots per scene", async () => {
+  const { handler, provider, groupKey } = await freshPipeline();
+
+  const saved = await call(handler, "POST", "/ecom/api/workflow/config", {
+    id: WORKFLOW_ID, settings: { sceneCount: 3, sceneOutputs: 2 }
+  });
+  assert.equal(saved.status, 200);
+  assert.deepEqual(saved.json.workflow.settings, { sceneCount: 3, sceneOutputs: 2 });
+  assert.deepEqual(saved.json.workflow.settingFields.map(function (f) { return f.key; }),
+    ["sceneCount", "sceneOutputs"], "the declaration travels with the values");
+
+  const estimate = await call(handler, "GET", "/ecom/api/workflow/estimate?groupKey=" + encodeURIComponent(groupKey));
+  const plan = estimate.json.plan;
+  // 24 二创T恤 × 3 场景 × 2 张 = 144, so the whole group is 1 + 8 + 24 + 144.
+  assert.equal(plan.plan.scene, 144);
+  assert.equal(plan.plan.total, 177);
+  assert.equal(plan.settings.sceneCount, 3);
+  assert.equal(plan.settings.sceneOutputs, 2);
+
+  const run = await runPipeline(handler, { groupKey: groupKey });
+  assert.equal(run.status, "success", run.error || "");
+  assert.equal(provider.calls.generate, 144, "the run spends what the settings say");
+  assert.equal(provider.total(), 177);
+});
+
+test("an out-of-range setting is clamped, and a small scene pool caps the count", async () => {
+  // The fixture's scene pool holds four.
+  const { handler, groupKey } = await freshPipeline({ scenes: 4 });
+
+  const saved = await call(handler, "POST", "/ecom/api/workflow/config", {
+    id: WORKFLOW_ID, settings: { sceneCount: 999, sceneOutputs: 0 }
+  });
+  assert.deepEqual(saved.json.workflow.settings, { sceneCount: 24, sceneOutputs: 1 },
+    "values are clamped to the declared range rather than saved as typed");
+
+  const plan = (await call(handler, "GET", "/ecom/api/workflow/estimate?groupKey=" + encodeURIComponent(groupKey))).json.plan;
+  assert.equal(plan.settings.sceneCountRequested, 24);
+  assert.equal(plan.settings.sceneCount, 4, "you cannot shoot a T恤 in more scenes than the pool holds");
+  assert.equal(plan.plan.scene, 24 * 4 * 1);
+  assert.equal(plan.warnings.some(function (w) { return w.indexOf("池子里只有") !== -1; }), true,
+    "and it says so rather than repeating a scene in silence");
+});
+
+test("settings persist, survive a restart, and reach the client through /state", async () => {
+  const { handler, root, now } = await freshPipeline();
+  await call(handler, "POST", "/ecom/api/workflow/config", { id: WORKFLOW_ID, settings: { sceneCount: 6 } });
+
+  const view = (await call(handler, "GET", "/ecom/api/state")).json.workflows[0];
+  assert.equal(view.settings.sceneCount, 6);
+  assert.equal(view.settings.sceneOutputs, 4, "a partial save leaves the other field alone");
+
+  // Reopening the store is what a host restart looks like to the config.
+  const reopened = createHandler(createStore(root), makeStubProvider(), { now: now });
+  const again = (await call(reopened, "GET", "/ecom/api/state")).json.workflows[0];
+  assert.equal(again.settings.sceneCount, 6);
+  assert.deepEqual(again.settingFields.map(function (f) { return f.key; }), ["sceneCount", "sceneOutputs"]);
+});

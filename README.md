@@ -300,11 +300,29 @@ any failures is reported as **失败** (a green 成功 would hide it) with a sum
 saying what was kept, and the group stays in the queue — the next run resumes.
 Nothing is ever deleted to "clean up" a failure.
 
+**Parameters.** The two numbers that decide step 4's shape — and most of a run's
+cost — are settings, not code: **随机选择多少个场景图** (how many scenes each
+二创T恤 is shot in) and **每个场景图出几张** (how many images each of those scenes
+yields). They live on the workflow's page under 「参数」, save as you change them,
+and apply to the next run; the estimate reflects them immediately, so the cost of a
+choice is visible before it is spent. Defaults are 2 and 4, which is exactly the
+225-call shape above.
+
+A workflow **declares** its settings (key, label, type, default, range, help) and
+the engine does the rest: values are validated, clamped into range rather than
+rejected, stored per workflow, handed to `run` as `ctx.settings`, and returned to
+the client with the declaration — so the form is generated from the declaration and
+a new knob needs no client change. Two honest edges: a value outside the declared
+range is clamped (the box snaps back to what will actually be used), and asking for
+more *distinct* scenes than the pool holds is capped at the pool size and said so in
+the estimate, because a T恤 cannot be shot in more different scenes than exist.
+
 Env knobs: `ECOM_WORKFLOW_MAX_CALLS` (ceiling per run), `ECOM_PIPELINE_CONCURRENCY`
 (calls this workflow keeps in flight; the host's global cap still applies),
-`ECOM_PIPELINE_RECREATE_OUTPUTS` (2), `ECOM_PIPELINE_SCENE_PASSES` (2),
-`ECOM_PIPELINE_SCENE_OUTPUTS` (4). The last three change the pipeline's shape, so
-they exist to dial the cost down without a code change.
+`ECOM_PIPELINE_RECREATE_OUTPUTS` (2). The two step-4 numbers above are settings now;
+their env vars (`ECOM_PIPELINE_SCENE_PASSES`, `ECOM_PIPELINE_SCENE_OUTPUTS`) remain
+only as the **defaults** of those settings, so an existing deployment keeps the
+shape it was configured with.
 
 ### Why the store now writes atomically
 
@@ -546,7 +564,8 @@ selection click.
 | `lib/workflows.js` | Host | The workflow registry: the one place a workflow is declared and validated at mount. Holds no state. |
 | `lib/workflowRunner.js` | Host | Executes a workflow and records every attempt: run records, log capture and caps, one-run-per-workflow, history retention, crash recovery, run params, and the concurrency-guarded provider a workflow is allowed to see. |
 | `lib/scheduler.js` | Host | Schedule shapes and arithmetic (interval / daily), the in-process tick, and missed-occurrence detection. Pure time logic plus a timer — no workflow knowledge. |
-| `lib/printPipeline.js` | Host | 印花流水线: the inbox scan and grouping, the T恤/prompt resolution, the four-step pipeline, the cost estimate, and resume-from-artefacts. The one workflow-specific module; keeping it out of the engine is what lets the engine stay generic. |
+| `lib/workflowSettings.js` | Host | The settings declaration and its resolver: what a workflow may expose as a knob, and how a stored value resolves to the one actually used (clamped, defaulted, never trusted raw). Its own module because the registry and the definitions both need it and neither may require the other. |
+| `lib/printPipeline.js` | Host | 印花流水线: the inbox scan and grouping, the T恤/prompt resolution, the four-step pipeline, its declared settings, the cost estimate, and resume-from-artefacts. The one workflow-specific module; keeping it out of the engine is what lets the engine stay generic. |
 | `lib/client.js` | Client | Registers the workbench as a `conversation.view` tab with React; all UI/state calls the host API. Also carries the workflow pages (list + detail) and the app-style 成品库 shelf, found by workflow id. No image processing here. |
 | `cordis.patch.yml` | Patch | Inserts the `ecommerce-workbench` bundle entry. |
 | `test/host-api.test.js` | Test | Drives the real handler + store through the full extract → recreate → delete → clear lifecycle (with the local provider), plus the workflow engine end to end: config, manual runs, failure, single-flight, scheduling, missed occurrences, retention, crash recovery, and persistence. |
@@ -609,8 +628,8 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 
 ## Verify
 
-- Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js && node --check lib/printPipeline.js`
-- Tests: `node --test "test/*.test.js"` (**90/90 pass**). (The quoted glob is
+- Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowSettings.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js && node --check lib/printPipeline.js`
+- Tests: `node --test "test/*.test.js"` (**95/95 pass**). (The quoted glob is
   required: `node --test test/` is not usable on this Node/Windows combination —
   it tries to load the directory as a module. The three files can also be listed
   explicitly.)
@@ -635,7 +654,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     workflow's provider calls go through the shared semaphore while
     `withGeneration` is unreachable, and that config + history survive reopening
     the store.
-  - `test/print-pipeline.test.js` (14) drives 印花流水线 through the real handler
+  - `test/print-pipeline.test.js` (17) drives 印花流水线 through the real handler
     with a counting stub provider, so a run's real cost is asserted exactly:
     **一组的 225 次调用** (1 extract + 8 recreate + 24 T恤 + 192 场景, from 4
     prompts × 2, 3 款式, 2 passes × 4), that a second run costs nothing, that a
@@ -648,7 +667,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     leaving the queue and re-approval re-queuing it, listing/removing products
     with their bytes, deleting a group while keeping its products, and a stale
     T恤 selection falling back to every photo.
-  - `test/client-render.test.js` (9) builds the real client component tree with
+  - `test/client-render.test.js` (11) builds the real client component tree with
     a minimal React stand-in, covering both levels of 工作流 (the list, and a
     workflow's page with its settings, schedule, run history and log), the
     pipeline group panel (group list, the 225-call estimate, warnings, and all

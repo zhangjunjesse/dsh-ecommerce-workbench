@@ -217,7 +217,12 @@ test("a workflow's page renders its settings, schedule and run history", () => {
   const workflow = {
     id: "demo.sync", name: "示例同步", description: "把二创印花同步到外部目录",
     enabled: true, schedule: { type: "interval", everyMinutes: 30 }, nextRunAt: now + 1800000,
-    lastRunAt: now - 60000, lastRunId: "run-a", lastStatus: "success", running: false, runId: null
+    lastRunAt: now - 60000, lastRunId: "run-a", lastStatus: "success", running: false, runId: null,
+    settingFields: [
+      { key: "sceneCount", label: "随机选择多少个场景图", type: "number", min: 1, max: 24, default: 2, help: "每件二创T恤随机挑这么多张场景图" },
+      { key: "sceneOutputs", label: "每个场景图出几张", type: "number", min: 1, max: 12, default: 4, help: "每张场景图生成几张成片" }
+    ],
+    settings: { sceneCount: 3, sceneOutputs: 4 }
   };
   const runs = [
     { id: "run-a", workflowId: "demo.sync", workflowName: "示例同步", trigger: "manual", status: "success", startedAt: now - 60000, finishedAt: now - 58000, durationMs: 2000, error: null, summary: "同步 3 个文件", skippedReason: null, logCount: 2 },
@@ -260,11 +265,28 @@ test("a workflow's page renders its settings, schedule and run history", () => {
     ["已跳过", "a skipped run in the history"],
     ["DSH 未运行期间错过了这次调度", "why that run was skipped"],
     ["开始同步", "a log line of the selected run"],
-    ["结果：同步 3 个文件", "the selected run's summary"]
+    ["结果：同步 3 个文件", "the selected run's summary"],
+    // The settings form is generated from the definition's declaration.
+    ["参数", "the settings block"],
+    ["随机选择多少个场景图", "a declared setting's label"],
+    ["每个场景图出几张", "the other setting"],
+    ["每件二创T恤随机挑这么多张场景图", "a setting's help line"],
+    ["1–24", "the declared range, so the user knows the bounds"]
   ].filter(function (entry) {
     return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
   }).map(function (entry) { return entry[1]; });
   assert.deepEqual(missing, [], "nothing the user needs is missing from the workflow page");
+
+  // The inputs must show the values actually in force, not the defaults.
+  const values = [];
+  (function walk(node) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.type === "input" && node.props && node.props.value !== undefined) values.push(String(node.props.value));
+    walk(node.children);
+  })(render(loadClient(patched, { __DEMO_WORKFLOWS__: [workflow], __DEMO_RUNS__: runs, __DEMO_RUN__: run }).view({}), 0));
+  assert.equal(values.indexOf("3") !== -1, true, "the overridden setting shows its saved value, got " + JSON.stringify(values));
+  assert.equal(values.indexOf("4") !== -1, true, "and the untouched one shows its default");
 });
 
 test("the workbench nav and its view list cannot drift apart", () => {
