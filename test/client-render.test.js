@@ -538,9 +538,12 @@ test("成品库 is a feed of 款式 — one card each, not one per shot", () => 
   assert.equal(ratios.indexOf("3 / 4") !== -1, true, "an unmeasured 款式 falls back to the 3:4 the pipeline asks for");
 });
 
-test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 switcher", () => {
+test("a 商品 opens as a modal: cover, arrows, left rail — and no 款式 strip", () => {
   const patched = CLIENT_SOURCE
     .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
+    // Seeded too: with `loading` still true the feed never renders, and the modal
+    // would be tested against an empty shelf behind it.
+    .replace("var loadingState = React.useState(true);", "var loadingState = React.useState(false);")
     .replace("var openState = React.useState(null);", "var openState = React.useState(__DEMO_OPEN__);");
   assert.match(patched, /useState\(__DEMO_OPEN__\)/, "the open-商品 seed no longer applies — update it");
 
@@ -555,24 +558,24 @@ test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 s
     ["‹", "the previous-shot arrow"],
     ["›", "the next-shot arrow"],
     ["点击图片可全屏放大", "that the cover itself can be enlarged"],
-    ["款式", "the 款式 switcher"],
     ["这一张的来源", "what the shot is made of"],
     ["商品信息", "the product block"],
-    ["删除这张", "removing a shot"],
-    ["#1", "a 款式 entry"],
-    ["#2", "the other 款式 entry"]
+    ["删除这张", "removing a shot"]
   ].filter(function (entry) {
     return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
   }).map(function (entry) { return entry[1]; });
-  assert.deepEqual(missing, [], "the product page is missing something");
+  assert.deepEqual(missing, [], "the product modal is missing something");
 
-  // Every part of the page must actually render its images: the left rail of
-  // this 款式's shots, the cover, the 款式 switcher, and the two references.
+  // Every part of the modal must actually render its images: the left rail of
+  // this 款式's shots, the cover, and the two references. t2.png (the OTHER
+  // 款式's composite) is deliberately absent — the modal shows one 款式 only.
   const srcs = collectImgSrcsOf(tree);
-  ["a-1.png", "a-2.png", "t1.png", "t2.png", "s1.png"].forEach(function (file) {
+  ["a-1.png", "a-2.png", "b-1.png", "t1.png", "s1.png"].forEach(function (file) {
     assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
-      file + " is not rendered (got " + srcs.length + " images)");
+      file + " is not rendered (got " + JSON.stringify(srcs) + ")");
   });
+  assert.equal(srcs.some(function (src) { return src.indexOf("t2.png") !== -1; }), false,
+    "a 款式 that is not open must not be rendered at all");
 
   // The cover must be BOUNDED by its stage, never sized to the file. The page's
   // first version used `width/height: 100%` inside an indefinite-height row, so
@@ -619,6 +622,18 @@ test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 s
     tooltips.some(function (t) { return t.indexOf("关闭") !== -1; }),
     true,
     "there must be a visible close affordance"
+  );
+
+  // No 款式 strip: switching 款式 is the shelf's job, and that row's height now
+  // belongs to the image. Asserted on the modal subtree only — the feed behind it
+  // legitimately shows one card per 款式.
+  const modalText = collectText(overlay, []);
+  assert.equal(modalText.indexOf("款式"), -1, "the 款式 strip's own label must be gone from the modal");
+  assert.equal(modalText.indexOf("#1"), -1, "so must its per-款式 tiles");
+  assert.equal(
+    modalText.some(function (line) { return line.indexOf("款式：") !== -1; }),
+    true,
+    "the info block still says which 款式 this is"
   );
 });
 
