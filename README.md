@@ -614,7 +614,7 @@ selection click.
 | `lib/scheduler.js` | Host | Schedule shapes and arithmetic (interval / daily), the in-process tick, and missed-occurrence detection. Pure time logic plus a timer — no workflow knowledge. |
 | `lib/workflowSettings.js` | Host | The settings declaration and its resolver: what a workflow may expose as a knob, and how a stored value resolves to the one actually used (clamped, defaulted, never trusted raw). Its own module because the registry and the definitions both need it and neither may require the other. |
 | `lib/printPipeline.js` | Host | 印花流水线: the inbox scan and grouping, the T恤/prompt resolution, the four-step pipeline, its declared settings, the cost estimate, and resume-from-artefacts. The one workflow-specific module; keeping it out of the engine is what lets the engine stay generic. |
-| `lib/client.js` | Client | Registers the workbench as a `conversation.view` tab with React; all UI/state calls the host API. Also carries the workflow pages (list + detail) and the app-style 成品库 shelf, found by workflow id. No image processing here. |
+| `lib/client.js` | Client | Registers the workbench as a `conversation.view` tab with React; all UI/state calls the host API. Also carries the workflow pages (list + detail), the app-style 成品库 shelf, found by workflow id, and the `shell.overlay` pill that collapses the composer. No image processing here. |
 | `cordis.patch.yml` | Patch | Inserts the `ecommerce-workbench` bundle entry. |
 | `scripts/backfill-output-fields.js` | Repo tool | One-off, idempotent: names the 款式 on 成品 records written before those fields existed, by looking each shot's composite up in `tshirtRecreations`. Not part of the plugin (`package.json#files` excludes it) — it is a repair tool for the store on disk. |
 | `test/host-api.test.js` | Test | Drives the real handler + store through the full extract → recreate → delete → clear lifecycle (with the local provider), plus the workflow engine end to end: config, manual runs, failure, single-flight, scheduling, missed occurrences, retention, crash recovery, and persistence. |
@@ -631,6 +631,32 @@ The package is installed in the web profile as a `file:` dependency, so its
 workbench as **one view in the conversation view ring** (`conversation.view`,
 id `ecom-workbench`) — additive, so the native Chat view and the always-present
 composer stay usable. Click the「电商工作台」tab to show the workbench.
+
+### 收起输入框: giving the workbench the composer's height
+
+The workbench wants as much height as it can get, and the conversation composer
+sits below it. A small pill — `⌄ 收起输入框` / `⌃ 展开输入框` — hides that composer
+and gives the height back.
+
+It registers into the shell's own **`shell.overlay`** slot
+(`id: "ecom-composer-toggle"`, `order: 100`), not into the workbench. The composer
+belongs to the shell, so once it is collapsed the way back has to be something
+that is still on screen — a button inside the workbench would disappear together
+with the thing it was meant to restore. `shell.overlay` is documented as a
+"frame-wide floating layer, above every column and outside their scroll
+containers", **list**-kind (`replaceRisk: none`, so a fresh id sits beside the
+shipped entries instead of shadowing them) and click-through per entry.
+
+The collapse itself writes `display: none` onto the element the conversation UI
+marks with **`data-composer-seat`** — a hook that package declares itself, not a
+hashed CSS class — and puts the previous inline style back on the way out. React
+never sets a `style` on that element (it gets `className` and a ref), which is why
+this is safe to take; it is the only DOM this plugin touches that it does not own,
+and if the attribute ever disappears the pill simply does nothing rather than
+breaking the shell. The preference persists in
+`localStorage["dsh-ecom-composer-collapsed"]`, and the component restores the
+composer when it unmounts (plugin disabled or hot-reloaded) — "no input box and no
+button" is the one state worth guarding against.
 
 The client talks to the host over the loopback-fenced `/ecom/api` endpoint using
 `fetch`. Only same-machine browsers (`127.0.0.1`/`localhost`) are accepted.
@@ -678,7 +704,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 ## Verify
 
 - Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowSettings.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js && node --check lib/printPipeline.js`
-- Tests: `node --test "test/*.test.js"` (**95/95 pass**). (The quoted glob is
+- Tests: `node --test "test/*.test.js"` (**96/96 pass**). (The quoted glob is
   required: `node --test test/` is not usable on this Node/Windows combination —
   it tries to load the directory as a module. The three files can also be listed
   explicitly.)
@@ -716,7 +742,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     leaving the queue and re-approval re-queuing it, listing/removing products
     with their bytes, deleting a group while keeping its products, and a stale
     T恤 selection falling back to every photo.
-  - `test/client-render.test.js` (11) builds the real client component tree with
+  - `test/client-render.test.js` (12) builds the real client component tree with
     a minimal React stand-in, covering both levels of 工作流 (the list, and a
     workflow's page split into its three tabs — the settings tab, and the history
     tab with its runs and log, each asserted not to render the other's content),
@@ -732,7 +758,12 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     card opens the 商品 *on the shot it was showing*), the
     mount-time hydration (a behavioural test, so a module added
     to the load list but missed on the mount path fails here instead of silently
-    rendering empty), and that the nav, `viewNames` and `viewEls` lists cannot
+    rendering empty), the `shell.overlay` pill (registered into that slot with an
+    id, carrying a label that says what it does, and — walking the click path —
+    asking for the collapsed state; the harness also asserts that the slot a
+    component registers into is one the bundle actually injected, because a typo
+    there leaves the entry dangling while the registration still looks fine), and
+    that the nav, `viewNames` and `viewEls` lists cannot
     drift apart (a mismatch shows the wrong view under a nav label, silently and
     only after the insertion point).
 - The estimate was also run against this machine's **real** store contents

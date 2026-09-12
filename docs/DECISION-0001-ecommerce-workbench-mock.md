@@ -46,6 +46,11 @@ Status: current
 - **「默认启动视图」限制**：`conversation.view` 视图环在 `dsh-client-ui-conversation` 里锚定 `DEFAULT_VIEW_ID = "chat"`（`resolveActiveView` 恒回退到 chat；活动视图 id 存于该插件内部的 `chatStore`，即 `localStorage["dsh.conversation.chat"]`，未对插件暴露 setter）。因此工作台作为**视图标签**打开 DSH 时默认显示对话，需点「电商工作台」标签切入；把工作台变成真正的启动首屏需改动 DSH 外壳（`dsh-client-ui-conversation` 的默认视图行为），而非本插件可独立完成。**用户已明确接受标签模型（保持现状）**：工作台通过点「电商工作台」标签进入，不作为启动首屏，也不再改动 DSH 外壳。
 - **批量生成改为并发**，且**单项失败/卡住不再拖垮整批**：印花提取多图、印花二创多张输出，改为宿主端并发调用（默认并发 2，`ECOM_GENERATION_CONCURRENCY` 可调），而非顺序逐张。用真实 ToAPIs 服务实测发现：并发 4 时其中一路会**无限期卡住**（既不成功也不报错，远超正常的 ~50-90s），且当时的实现一旦有一路失败会用 `Promise.all` 语义**整批丢弃**，导致「服务商后台已生成 N 张，工作台却只看到更少/没有」。修复为：并发度降到经验安全值 2；`createToapisProvider` 单次调用超时从 10 分钟降到 4 分钟（`ECOM_PROVIDER_TIMEOUT_MS` 可调），卡住的一路更快失败而非拖住整批；每一项独立 try/catch，只要有一项成功就保留已成功结果、`job.status="done"` 并在 `job.error` 里给出「N 张失败，已保留 M 张成功结果」的非阻塞提示，只有**全部失败**才把 job 标记为 `error`。已在真实服务上复现问题（并发 4 一路卡死）并验证修复（并发 2，count=4 全部成功，`error=null`）。
 - **Correction: T恤二创"多选"的单位**。用户先要求「T恤可以多选，印花也可以多选，笛卡尔积生成」，随后澄清多选指的是**一件T恤的多张照片**（正面/背面/细节图），不是多选不同的T恤记录。已按澄清改回：`/ecom/api/tshirtRecreate` 接受单个 `tshirtId` + 该件T恤下可多选的 `tshirtImages[]` + 可多选的 `printIds[]`；笛卡尔积从「多件T恤 x 印花」改为「该件T恤选中的照片 x 选中的印花」。客户端T恤选择器改回单选，选中T恤后展开的照片带改为多选。
+- **收起输入框，把高度让给工作台**。用户要求：「输入框这个区域有没有可能加一个折叠的按钮？我想让工作台区域多一些」。做法是往 `shell.overlay` 注册一个常驻小药丸（`id: "ecom-composer-toggle"`, `order: 100`），点击把底部输入框收起/展开。
+  - **为什么不放在工作台里**：输入框属于外壳，不属于本插件；一旦收起，回来的路必须在"永远在屏上"的位置——工作台内的按钮会跟着需要它的那个视图一起消失，用户就被锁在没有输入框的状态里。
+  - **为什么是 `shell.overlay`**：它是外壳文档里给插件用的整框浮层座位——"frame-wide floating layer, above every column and outside their scroll containers"，list 类型（`replaceRisk: none`，新 id 加在既有条目旁边而不是遮蔽它们），且条目默认点击穿透。相比改动 DSH 外壳，这是受支持且升级不会丢的位置。
+  - **折叠动作**：写在外壳自己声明的 `data-composer-seat` 上（`display:none`，退出时把原内联样式还回去）。这个包从不在该元素上设置 `style`（只给 `className` 和 ref），所以接管 `display` 是安全的；这是本插件唯一触碰的非自有 DOM，与既有的布局绑定同源。属性若消失，按钮只是无效，不会把外壳弄坏。
+  - 偏好存 `localStorage["dsh-ecom-composer-collapsed"]`，刷新后保持；组件卸载时（插件被禁用或热更）会把输入框还回去——"既没有输入框也没有按钮"是唯一必须防住的状态。收起状态下会低频（1.2s）对账一次，因为换会话时外壳可能重建这个元素；展开状态不做任何维持。
 
 ## Verification
 

@@ -86,7 +86,7 @@ function collectText(node, out) {
 }
 
 /**
- * Evaluate the client bundle, run its `apply`, and return the view component it
+ * Evaluate the client bundle, run its `apply`, and return the components it
  * registers.
  *
  * @param {string} source - client source (possibly patched in memory).
@@ -96,8 +96,11 @@ function collectText(node, out) {
  * @param {boolean} [options.runEffects] - run `useEffect` bodies, which is what
  *   exercises the mount-time state load.
  * @param {Function} [options.fetch] - replaces `fetch` for apiGet/apiPost.
- * @returns {{view: Function, stateCalls: any[]}} the registered view and every
- *   value any `useState` setter was called with.
+ * @returns {{view: Function, entries: object, injected: string[], stateCalls: any[]}} the
+ *   `conversation.view` component, every registration keyed `name:id` (the plugin
+ *   registers into more than one slot — keeping only the last one is how a test
+ *   ends up rendering the wrong component), the slot names the bundle declared a
+ *   dependency on, and every value any `useState` setter was called with.
  */
 function loadClient(source, demo, options) {
   const settings = options || {};
@@ -122,13 +125,21 @@ function loadClient(source, demo, options) {
   const mod = captured.factory(shim);
 
   let registered = null;
+  const entries = {};
+  const injected = [];
   const slots = {
-    inject: function (name, fn) { fn(); },
-    register: function (opts, comp) { registered = comp; return function () {}; }
+    // The name matters: a slot is only wired up if the plugin injected it, so a
+    // typo here leaves the entry dangling and nothing else would notice.
+    inject: function (name, fn) { injected.push(name); fn(); },
+    register: function (opts, comp) {
+      entries[opts.name + ":" + (opts.id === undefined ? "" : opts.id)] = comp;
+      if (opts.name === "conversation.view") registered = comp;
+      return function () {};
+    }
   };
   mod.apply({ get: function (key) { return key === "slots" ? slots : null; } });
   assert.equal(typeof registered, "function", "the workbench registered no conversation view");
-  return { view: registered, stateCalls: react.stateCalls };
+  return { view: registered, entries: entries, injected: injected, stateCalls: react.stateCalls };
 }
 
 /** Render the whole workbench once and return every string it produced. */
@@ -317,6 +328,65 @@ test("a workflow's page renders its settings, schedule and run history", () => {
   })(render(loadClient(patched, { __DEMO_WORKFLOWS__: [workflow], __DEMO_RUNS__: runs, __DEMO_RUN__: run }).view({}), 0));
   assert.equal(values.indexOf("3") !== -1, true, "the overridden setting shows its saved value, got " + JSON.stringify(values));
   assert.equal(values.indexOf("4") !== -1, true, "and the untouched one shows its default");
+});
+
+test("the composer can be collapsed from a shell.overlay pill", () => {
+  // The workbench wants the composer's height, but the composer is shell-owned —
+  // so the control has to live in the shell's own floating layer, where it is
+  // still reachable once the composer is gone. Two things can break silently and
+  // are asserted here: the entry landing in the wrong slot (or shadowing another
+  // one), and the pill rendering without a label that says what it does.
+  const loaded = loadClient(CLIENT_SOURCE, {});
+  const toggle = loaded.entries["shell.overlay:ecom-composer-toggle"];
+  assert.equal(typeof toggle, "function", "the toggle must register into shell.overlay");
+  assert.deepEqual(
+    Object.keys(loaded.entries).sort(),
+    ["conversation.view:ecom-workbench", "shell.overlay:ecom-composer-toggle"],
+    "the plugin registers exactly two things — an additive overlay entry must not shadow another slot"
+  );
+  // The overlay is a list slot: a fresh id sits beside the shipped entries. A
+  // registration without an id would still be additive, but ids are what owners
+  // use to address an entry, so the contract asks for one.
+  assert.match(CLIENT_SOURCE, /id: "ecom-composer-toggle"/, "the overlay entry must carry an id");
+
+  // Injected name and registered name have to agree. A slot is only wired up if
+  // the plugin declared a dependency on it, so a typo in `inject(...)` leaves the
+  // entry dangling — the registration itself still looks perfectly fine.
+  assert.deepEqual(loaded.injected, ["shell.overlay", "conversation.view"],
+    "the plugin must inject each slot it registers into");
+  Object.keys(loaded.entries).forEach(function (key) {
+    const slotName = key.slice(0, key.indexOf(":"));
+    assert.equal(loaded.injected.indexOf(slotName) !== -1, true,
+      key + " registers into a slot the plugin never injected");
+  });
+
+  const text = collectText(render(toggle({}), 0), []);
+  assert.equal(text.some(function (line) { return line.indexOf("收起输入框") !== -1; }), true,
+    "the pill must say what pressing it does, got " + JSON.stringify(text));
+  assert.equal(text.some(function (line) { return line.indexOf("展开输入框") !== -1; }), false,
+    "it starts expanded, so it must not offer to expand");
+
+  // Walking the real click path, not seeding the state: the click must ask for
+  // the collapsed state, which is what the effect then applies to the shell.
+  let pill = null;
+  (function walk(node) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.type === "button") pill = pill || node;
+    walk(node.children);
+  })(render(toggle({}), 0));
+  assert.ok(pill, "the overlay entry must render a button");
+  assert.equal(typeof pill.props.onClick, "function", "the pill must be clickable");
+  pill.props.onClick();
+  assert.equal(loaded.stateCalls.indexOf(true) !== -1, true,
+    "clicking must ask for the collapsed state, got " + JSON.stringify(loaded.stateCalls));
+
+  // The hook it hangs that state on is the shell's own declared attribute, and
+  // the plugin must be able to render with no DOM at all (effects included).
+  assert.match(CLIENT_SOURCE, /\[data-composer-seat\]/,
+    "collapsing is only legitimate through the seat the conversation UI declares");
+  assert.equal(render(loadClient(CLIENT_SOURCE, {}, { runEffects: true }).entries["shell.overlay:ecom-composer-toggle"]({}), 0) !== null, true,
+    "the pill must render even when there is no document (the effect body guards on it)");
 });
 
 test("the workbench nav and its view list cannot drift apart", () => {
