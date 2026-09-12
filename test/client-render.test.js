@@ -250,22 +250,27 @@ test("a workflow's page renders its settings, schedule and run history", () => {
     .replace("var detailState = React.useState(null);", "var detailState = React.useState(__DEMO_RUN__);");
   assert.match(patched, /useState\(__DEMO_WORKFLOWS__\[0\]\.id\)/, "the seed for the open workflow page no longer applies");
 
-  const text = renderWorkbench(patched, {
-    __DEMO_WORKFLOWS__: [workflow],
-    __DEMO_RUNS__: runs,
-    __DEMO_RUN__: run
-  });
+  // The page is tabbed, so the settings live on one tab and the log on another;
+  // a single render would only ever prove that one of them exists.
+  function textFor(tab) {
+    const seeded = patched.replace("var tabState = React.useState(tabs[0].key);", "var tabState = React.useState(__DEMO_TAB__);");
+    assert.match(seeded, /useState\(__DEMO_TAB__\)/, "the tab seed no longer applies — update it");
+    return renderWorkbench(seeded, {
+      __DEMO_WORKFLOWS__: [workflow],
+      __DEMO_RUNS__: runs,
+      __DEMO_RUN__: run,
+      __DEMO_TAB__: tab
+    });
+  }
+  const settingsText = textFor("settings");
   const missing = [
-    ["← 返回工作流", "the way back to the list"],
+    ["← 工作流", "the way back to the list"],
     ["示例同步", "the workflow's name"],
     ["已启用", "its enabled state"],
     ["每 30 分钟", "its schedule in words"],
     ["下次运行", "when it runs next"],
-    ["运行记录", "the history section"],
-    ["已跳过", "a skipped run in the history"],
-    ["DSH 未运行期间错过了这次调度", "why that run was skipped"],
-    ["开始同步", "a log line of the selected run"],
-    ["结果：同步 3 个文件", "the selected run's summary"],
+    ["设置与参数", "the tab the settings live on"],
+    ["运行记录", "the tab that holds the history"],
     // The settings form is generated from the definition's declaration.
     ["参数", "the settings block"],
     ["随机选择多少个场景图", "a declared setting's label"],
@@ -273,9 +278,34 @@ test("a workflow's page renders its settings, schedule and run history", () => {
     ["每件二创T恤随机挑这么多张场景图", "a setting's help line"],
     ["1–24", "the declared range, so the user knows the bounds"]
   ].filter(function (entry) {
-    return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
+    return !settingsText.some(function (line) { return line.indexOf(entry[0]) !== -1; });
   }).map(function (entry) { return entry[1]; });
   assert.deepEqual(missing, [], "nothing the user needs is missing from the workflow page");
+
+  const runsText = textFor("runs");
+  const missingHistory = [
+    ["运行记录", "the history section"],
+    ["已跳过", "a skipped run in the history"],
+    ["DSH 未运行期间错过了这次调度", "why that run was skipped"],
+    ["开始同步", "a log line of the selected run"],
+    ["结果：同步 3 个文件", "the selected run's summary"]
+  ].filter(function (entry) {
+    return !runsText.some(function (line) { return line.indexOf(entry[0]) !== -1; });
+  }).map(function (entry) { return entry[1]; });
+  assert.deepEqual(missingHistory, [], "the history tab is missing something");
+
+  // And the tabs must actually separate the two, or they are decoration: a
+  // page that renders everything at once is the page this replaced.
+  assert.equal(
+    runsText.some(function (line) { return line.indexOf("随机选择多少个场景图") !== -1; }),
+    false,
+    "the settings form must not render on the history tab"
+  );
+  assert.equal(
+    settingsText.some(function (line) { return line.indexOf("开始同步") !== -1; }),
+    false,
+    "the run log must not render on the settings tab"
+  );
 
   // The inputs must show the values actually in force, not the defaults.
   const values = [];
@@ -402,7 +432,7 @@ test("the pipeline panel renders its groups, estimate and four result stages", (
     ["已完成", "a finished group's status"],
     ["未确认", "an unapproved group's status"],
     ["估算并运行", "the estimate entry point"],
-    ["确认排队", "handing a group to the scheduler"],
+    ["已排队", "a group handed to the scheduler"],
     ["合计 225 次生成调用", "the cost, before it is spent"],
     ["本次还需 225 次", "what this run would actually do"],
     ["上限 400 次", "the ceiling it will be checked against"],
@@ -417,6 +447,24 @@ test("the pipeline panel renders its groups, estimate and four result stages", (
     return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
   }).map(function (entry) { return entry[1]; });
   assert.deepEqual(missing, [], "the pipeline panel is missing something the user needs");
+
+  // The estimate and the outputs belong to *one group*, so they must render
+  // inside that group's own row. They used to be appended under the whole list,
+  // which put the answer — and the three buttons that act on it — arbitrarily
+  // far from the row that was clicked.
+  const flat = text.join("|");
+  const rowA = flat.indexOf("商品A");
+  const estimateAt = flat.indexOf("这一组要花多少");
+  const rowB = flat.indexOf("商品B");
+  assert.ok(rowA !== -1 && rowB !== -1, "both groups must be on the page");
+  assert.ok(estimateAt > rowA && estimateAt < rowB,
+    "the estimate for 商品A must sit inside its row, before the next group");
+  assert.ok(flat.indexOf("① 提取印花") > rowA && flat.indexOf("① 提取印花") < rowB,
+    "so must the group's own outputs");
+  // The raw file-name list under every row was noise at this density; the names
+  // now live in the row's tooltip instead of in the layout.
+  assert.equal(text.some(function (line) { return line === "a.png、b.png"; }), false,
+    "the row must not print its reference file names inline");
 
   // The four stages must actually render their own artefacts. Image file names
   // live in `src`, not in text, so the tree is walked rather than the text.

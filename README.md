@@ -173,26 +173,35 @@ data already has that shape:
 | 款式 / SKU | 一个「二创T恤」（某张 T恤照片 × 某张二创印花） |
 | 款式图集 | 该款式的 8 张场景成片 |
 
-**The shelf is a waterfall** — the browsing shape a shopping app uses — with
-every finished shot as a tile, newest first, each captioned with its 商品 and
-which 款式 and 换装+裂变 pass it came from. Why a waterfall rather than a grid of
-covers: this is a shelf of images to scan, and the shots come back in whatever
-shape the model produced. A fixed tile would crop them; the waterfall keeps every
-shot whole. It reuses 场景图管理's machinery, including its two load-bearing rules
-(see there): **round-robin into explicit columns**, never CSS multi-column, and
-**a height is reserved only when the size was really measured** — taken from the
-header of the bytes the pipeline stored (`lib/imageSize.js`), never guessed,
-because a guessed ratio is what stretches an image; an unmeasured shot lays out at
-its natural ratio. Tiles mount a page at a time as a sentinel scrolls into view,
-and one 商品 can be filtered to via the chips.
+**The shelf shows one card per 款式 (SKU), and one image per card** — 4 across,
+newest first. A 款式's other shots are behind a **swipe**: drag the card left or
+right, or use its ‹ › arrows. Why one image per 款式 and not per shot: a 商品 has
+24 款式 × 8 shots = **192 near-identical images**, and a wall of those gives the
+eye nothing to compare. One card per 款式 makes the shelf a list of *things* — the
+shape of a real product listing, where you swipe the photo to see the rest. The
+card reserves its height from the first shot's ratio, so swiping never changes a
+card's height and the grid cannot jump. The 4-across count is fixed rather than
+width-derived: this shelf is for scanning, and a predictable tile size matters
+more here than filling the pane.
 
-**Tapping a tile opens that 商品's page, on that shot**: the cover large in the
-middle with ‹ › either side and a counter (`2 / 8`); **a rail of that 款式's other
-shots down the left**, click to switch; the 款式 switcher underneath as a
-horizontal strip of 二创T恤 thumbnails; and on the right what the current shot is
-made of (the scene photo it used and the 二创T恤 it wears) plus the counts. Clicking
-the cover opens it in the shared lightbox, ← / → move between shots, and any shot
-can be deleted from the page.
+The images come back in whatever shape the model produced, and **a height is
+reserved only when the size was really measured** — taken from the header of the
+bytes the pipeline stored (`lib/imageSize.js`), never guessed, because a guessed
+ratio is what stretches an image; an unmeasured shot lays out at the 3:4 the
+换装+裂变 prompt asks for. Tiles mount a page at a time as a sentinel scrolls into
+view, and one 商品 can be filtered to via the chips. Distribution into columns is
+the same **round-robin into explicit columns** 场景图管理 uses (`distributeColumns`)
+— never CSS multi-column, which reorders and cannot be paginated.
+
+**Clicking a card opens a modal, not a page**: the cover large with ‹ › either
+side and a counter (`第 2 / 8 张`); **a rail of that 款式's other shots down the
+left**, click to switch; and on the right what the current shot is made of (the
+scene photo it used and the 二创T恤 it wears) plus the counts. Clicking the cover
+opens it in the shared lightbox, ← / → move between shots, any shot can be deleted
+from the modal, and Esc or the backdrop closes it. It is a modal rather than a
+page because a page would replace the shelf and lose the browsing context you just
+had; and it deliberately has **no 款式 strip** — switching 款式 is the shelf's job,
+and that row's height now belongs to the image.
 
 It is deliberately **not** the same view as the workflow's group panel: the group
 panel is the operator's view (queue, cost estimate, all four stages including the
@@ -207,11 +216,19 @@ The workbench's first real workflow (`print.pipeline`, `lib/printPipeline.js`): 
 per-step button pressing. Open 工作流 → 印花流水线 (the row) → its page.
 
 The 工作流 module is **a list and a page**: the list says which workflows exist
-and how each last went; opening one gives that workflow its own page — its
-settings (enable, schedule, manual trigger), the work it owns (for the pipeline:
-the queue of reference groups and the cost estimate), and its complete run
-history with each run's log. Nothing is expanded inline inside a card; a
-workflow's page is where everything about it lives.
+and how each last went; opening one gives that workflow its own page — the page
+header carries the way back, the name, its live status and when it last ran, and
+everything else sits on **three tabs** so the page is one thing at a time:
+
+| Tab | What it holds |
+| --- | --- |
+| 分组与队列 | (only for a workflow that owns a queue) the reference groups, the upload composer, and one group's cost estimate and outputs — **opened inside that group's own row** |
+| 设置与参数 | the run card (enable/disable, schedule, manual trigger) and the workflow's declared settings |
+| 运行记录 | every run, and the selected run's log — the newest run is selected on arrival, so the tab shows a log rather than an instruction |
+
+Nothing is expanded inline inside a card, and the queue's estimate is never
+appended below the list: it belongs to one group, so it renders in that row,
+next to the buttons that act on it.
 
 ```
 一组参考图（同一商品的多个角度截图）
@@ -257,10 +274,20 @@ one group at a time — set 周期 to e.g. 每 1 小时 and approved groups are 
 in order, one per run.
 
 **Approval is what the scheduler consumes.** A scheduled run has nobody to show
-an estimate to, so it only picks up groups that were explicitly **确认排队**d;
-with nothing approved it does nothing and says so. A *manual* run names its
-target outright, so it needs no approval. Re-approving a finished group re-queues
-it (otherwise approving after adding more screenshots would silently do nothing).
+an estimate to, so it only picks up groups that were explicitly **排队**d (the
+row's toggle, stored as `approvedAt`); with nothing approved it does nothing and
+says so. A *manual* run names its target outright, so it needs no approval.
+Re-approving a finished group re-queues it (otherwise approving after adding more
+screenshots would silently do nothing).
+
+**A group's row is two lines, in the order the questions get asked.** The first
+line answers 「这是哪一组、现在什么状态、下一步做什么」 — a status dot, the
+name, the status chip, the reference-image count, then 「估算并运行」 and delete.
+The second line is the four step counts and the two secondary controls (「排队」,
+「看成品」/「收起成品」). Six controls on one line, as it was, made the primary
+action indistinguishable from the rest. The reference file names are no longer
+printed under every row — they are noise at this density and now live in the
+row's tooltip.
 
 **The cost is shown before it is spent, and capped.** 「估算并运行」 fetches
 `GET /ecom/api/workflow/estimate?groupKey=…` and shows the exact call counts per
@@ -570,7 +597,7 @@ selection click.
 | `cordis.patch.yml` | Patch | Inserts the `ecommerce-workbench` bundle entry. |
 | `test/host-api.test.js` | Test | Drives the real handler + store through the full extract → recreate → delete → clear lifecycle (with the local provider), plus the workflow engine end to end: config, manual runs, failure, single-flight, scheduling, missed occurrences, retention, crash recovery, and persistence. |
 | `test/print-pipeline.test.js` | Test | Drives 印花流水线 through the real handler with a counting provider stub: the 225-call arithmetic, resume-instead-of-repay, the hard ceiling, missing-prompt reporting, the loose-files bucket, upload collision and traversal, approval gating, product deletion, and that deleting a group keeps what it produced. |
-| `test/client-render.test.js` | Test | Builds the real client component tree with a minimal React stand-in, covering the 工作流 empty state, cards, schedule controls, run statuses, the log panel, the pipeline panel (groups, estimate, all four result stages) and the nav/view alignment invariant — the parts a syntax check cannot validate. |
+| `test/client-render.test.js` | Test | Builds the real client component tree with a minimal React stand-in, covering the 工作流 empty state, list rows, the detail page's three tabs (settings, history, and that each tab's content stays on its own tab), the pipeline panel (group rows, the inline estimate and all four result stages) and the nav/view alignment invariant — the parts a syntax check cannot validate. |
 | `docs/DECISION-0001-*.md` | Decision | Owning decision record for the workbench-as-view-tab design. |
 | `docs/DECISION-0002-*.md` | Decision | Owning decision record for the workflow engine (why workflows are code, why schedules are two shapes, why misses are skipped). |
 | `docs/DECISION-0003-*.md` | Decision | Owning decision record for 印花流水线 (why one group per run, why resume is derived from artefacts, why its products do not go back into the scene pool). |
@@ -669,15 +696,17 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     T恤 selection falling back to every photo.
   - `test/client-render.test.js` (11) builds the real client component tree with
     a minimal React stand-in, covering both levels of 工作流 (the list, and a
-    workflow's page with its settings, schedule, run history and log), the
-    pipeline group panel (group list, the 225-call estimate, warnings, and all
-    four result stages — asserted down to the image `src` each stage renders),
-    the 成品库 (the waterfall feed with its captions, every shot present, and the
-    reserved-ratio rule — a measured shot gets its real ratio, an unmeasured one
-    gets none rather than a guess; then a 商品's page: back, counter, both
-    arrows, the left shot rail, the 款式 switcher, the source/commerce blocks —
-    again down to each part's images; and that tapping a tile opens the page *on
-    that shot*), the mount-time hydration (a behavioural test, so a module added
+    workflow's page split into its three tabs — the settings tab, and the history
+    tab with its runs and log, each asserted not to render the other's content),
+    the pipeline group panel (group rows, the 225-call estimate and all four
+    result stages rendered *inside the row they belong to* — asserted down to the
+    image `src` each stage renders), the 成品库 (one card per 款式, the other shots
+    behind the swipe, and the reserved-ratio rule — a measured shot gets its real
+    ratio, an unmeasured one falls back to 3:4 rather than a guess; then the
+    modal: the fixed overlay, counter, both arrows, the left shot rail, the
+    source/commerce blocks and no 款式 strip — again down to each part's images;
+    and that clicking a card opens the 商品 *on the shot it was showing*), the
+    mount-time hydration (a behavioural test, so a module added
     to the load list but missed on the mount path fails here instead of silently
     rendering empty), and that the nav, `viewNames` and `viewEls` lists cannot
     drift apart (a mismatch shows the wrong view under a nav label, silently and
