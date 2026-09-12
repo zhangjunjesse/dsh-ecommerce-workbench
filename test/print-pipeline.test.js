@@ -333,8 +333,13 @@ test("approval queues a group for the scheduler, and a manual run needs none", a
   assert.equal(idle.status, "success");
   assert.match(idle.summary, /没有已确认/);
   // The message must say what to do, not just that nothing happened: a run with
-  // no target otherwise reads exactly like a broken button.
+  // no target otherwise reads exactly like a broken button. And it must name the
+  // controls by their *current* labels — this message pointed at a tab and a
+  // button that had since been renamed, which is a dead end for the user.
   assert.match(idle.summary, /估算并运行/);
+  assert.match(idle.summary, /分组与队列/);
+  assert.match(idle.summary, /排队/);
+  assert.equal(/确认排队|分组与成品/.test(idle.summary), false, "the hint must not name controls that no longer exist");
 
   const approved = await call(handler, "POST", "/ecom/api/workflow/group/approve", {
     groupKey: groupKey, approved: true, tshirtImages: []
