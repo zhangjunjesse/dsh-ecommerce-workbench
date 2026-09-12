@@ -462,11 +462,11 @@ test("the mount-time state load hydrates every module, 工作流 included", asyn
 // is a 商品, each 二创T恤 is a 款式, and that 款式's 场景成片 are its gallery.
 // ---------------------------------------------------------------------------
 
-/** Two 款式 under one 商品: t1 has two shots, t2 has one. */
+/** Two 款式 under one 商品: t1 has two shots, t2 has one (never measured). */
 const DEMO_PRODUCTS = [
-  { id: "p1", groupKey: "商品A", groupName: "商品A", file: "a-1.png", tshirtFile: "t1.png", sceneFile: "s1.png", createdAt: 3 },
-  { id: "p2", groupKey: "商品A", groupName: "商品A", file: "a-2.png", tshirtFile: "t1.png", sceneFile: "s2.png", createdAt: 2 },
-  { id: "p3", groupKey: "商品A", groupName: "商品A", file: "b-1.png", tshirtFile: "t2.png", sceneFile: "s3.png", createdAt: 1 }
+  { id: "p1", groupKey: "商品A", groupName: "商品A", file: "a-1.png", tshirtFile: "t1.png", sceneFile: "s1.png", width: 600, height: 800, pass: 0, createdAt: 3 },
+  { id: "p2", groupKey: "商品A", groupName: "商品A", file: "a-2.png", tshirtFile: "t1.png", sceneFile: "s2.png", width: 600, height: 800, pass: 1, createdAt: 2 },
+  { id: "p3", groupKey: "商品A", groupName: "商品A", file: "b-1.png", tshirtFile: "t2.png", sceneFile: "s3.png", pass: 0, createdAt: 1 }
 ];
 
 /** Every `src` in the rendered tree — images carry file names, text does not. */
@@ -481,7 +481,7 @@ function collectImgSrcsOf(node) {
   return found;
 }
 
-test("成品库 lists each 商品 as a cover card with its counts", () => {
+test("成品库 is a waterfall of finished shots, each captioned with its 商品 and 款式", () => {
   const patched = CLIENT_SOURCE
     .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
     // The shelf shows a loading state until the fetch lands; with a single render
@@ -494,18 +494,33 @@ test("成品库 lists each 商品 as a cover card with its counts", () => {
   const text = collectText(tree, []);
 
   const missing = [
-    ["1 个商品 · 3 张成片", "the shelf summary"],
-    ["商品A", "the 商品 name"],
-    ["3 张", "how many shots the 商品 has"],
-    ["2 个款式", "how many 款式 it has"]
+    ["3 张成片", "how many shots the shelf holds"],
+    ["商品A", "the 商品 name on a tile"],
+    ["款式 #1", "which 款式 a tile belongs to"],
+    ["款式 #2", "the other 款式"],
+    ["第 1 轮", "which 换装+裂变 pass a tile came from"]
   ].filter(function (entry) {
     return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
   }).map(function (entry) { return entry[0] + " — " + entry[1]; });
-  assert.deepEqual(missing, [], "the 商品 grid is missing something");
+  assert.deepEqual(missing, [], "the waterfall is missing something");
 
-  // The card shows a cover, not just a label.
-  assert.equal(collectImgSrcsOf(tree).some(function (src) { return src.indexOf("a-1.png") !== -1; }), true,
-    "the 商品 card must show a cover image");
+  // A waterfall, not a grid of covers: every shot is on the shelf.
+  const srcs = collectImgSrcsOf(tree);
+  ["a-1.png", "a-2.png", "b-1.png"].forEach(function (file) {
+    assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
+      file + " is not on the shelf (got " + srcs.length + " images)");
+  });
+  // The measured ratio is what reserves a tile's height; a guessed one would
+  // stretch the image, so an unmeasured product must get no ratio at all.
+  const ratios = [];
+  (function walk(node) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.type === "img" && node.props && node.props.style) ratios.push(node.props.style.aspectRatio === undefined ? "none" : node.props.style.aspectRatio);
+    walk(node.children);
+  })(tree);
+  assert.equal(ratios.indexOf("600 / 800") !== -1, true, "a measured product must reserve its real ratio");
+  assert.equal(ratios.indexOf("none") !== -1, true, "an unmeasured product must reserve nothing rather than a guess");
 });
 
 test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 switcher", () => {
@@ -514,7 +529,7 @@ test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 s
     .replace("var openState = React.useState(null);", "var openState = React.useState(__DEMO_OPEN__);");
   assert.match(patched, /useState\(__DEMO_OPEN__\)/, "the open-商品 seed no longer applies — update it");
 
-  const loaded = loadClient(patched, { __DEMO_PRODUCTS__: DEMO_PRODUCTS, __DEMO_OPEN__: "商品A" });
+  const loaded = loadClient(patched, { __DEMO_PRODUCTS__: DEMO_PRODUCTS, __DEMO_OPEN__: { groupKey: "商品A", shotId: null } });
   const tree = render(loaded.view({}), 0);
   const text = collectText(tree, []);
 
@@ -542,4 +557,24 @@ test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 s
     assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
       file + " is not rendered (got " + srcs.length + " images)");
   });
+});
+
+test("tapping a shot in the waterfall opens its 商品 on that shot", () => {
+  // The tile knows which shot it is; the page must not drop that on the floor and
+  // open on the first shot of the 款式 instead.
+  const patched = CLIENT_SOURCE
+    .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
+    .replace("var openState = React.useState(null);", "var openState = React.useState(__DEMO_OPEN__);");
+  assert.match(patched, /useState\(__DEMO_OPEN__\)/, "the open-商品 seed no longer applies — update it");
+
+  const loaded = loadClient(patched, {
+    __DEMO_PRODUCTS__: DEMO_PRODUCTS,
+    // p2 is the second shot of 款式 #1 (t1.png), which holds two shots.
+    __DEMO_OPEN__: { groupKey: "商品A", shotId: "p2" }
+  });
+  const text = collectText(render(loaded.view({}), 0), []);
+  // The counter is its own text node (`款式：1 / 2` on the info line is a
+  // different one), so assert on the node, not on a substring.
+  const counters = text.filter(function (line) { return /^\d+ \/ \d+$/.test(line); });
+  assert.deepEqual(counters, ["2 / 2"], "the page must open on the tapped shot, not on the first one");
 });

@@ -173,16 +173,26 @@ data already has that shape:
 | 款式 / SKU | 一个「二创T恤」（某张 T恤照片 × 某张二创印花） |
 | 款式图集 | 该款式的 8 张场景成片 |
 
-**The shelf** is a grid of 商品 cards: cover image, how many shots, how many
-款式, when it was last produced.
+**The shelf is a waterfall** — the browsing shape a shopping app uses — with
+every finished shot as a tile, newest first, each captioned with its 商品 and
+which 款式 and 换装+裂变 pass it came from. Why a waterfall rather than a grid of
+covers: this is a shelf of images to scan, and the shots come back in whatever
+shape the model produced. A fixed tile would crop them; the waterfall keeps every
+shot whole. It reuses 场景图管理's machinery, including its two load-bearing rules
+(see there): **round-robin into explicit columns**, never CSS multi-column, and
+**a height is reserved only when the size was really measured** — taken from the
+header of the bytes the pipeline stored (`lib/imageSize.js`), never guessed,
+because a guessed ratio is what stretches an image; an unmeasured shot lays out at
+its natural ratio. Tiles mount a page at a time as a sentinel scrolls into view,
+and one 商品 can be filtered to via the chips.
 
-**A 商品 opens as a product page**: the cover image large in the middle with ‹ ›
-either side and a counter (`1 / 8`); **a rail of that 款式's other shots down the
-left**, click to switch; the 款式 switcher underneath as a horizontal strip of
-二创T恤 thumbnails; and on the right what the current shot is made of (the scene
-photo it used and the 二创T恤 it wears) plus the counts. Clicking the cover opens
-it in the shared lightbox, ← / → move between shots, and any shot can be deleted
-from the page.
+**Tapping a tile opens that 商品's page, on that shot**: the cover large in the
+middle with ‹ › either side and a counter (`2 / 8`); **a rail of that 款式's other
+shots down the left**, click to switch; the 款式 switcher underneath as a
+horizontal strip of 二创T恤 thumbnails; and on the right what the current shot is
+made of (the scene photo it used and the 二创T恤 it wears) plus the counts. Clicking
+the cover opens it in the shared lightbox, ← / → move between shots, and any shot
+can be deleted from the page.
 
 It is deliberately **not** the same view as the workflow's group panel: the group
 panel is the operator's view (queue, cost estimate, all four stages including the
@@ -600,7 +610,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 ## Verify
 
 - Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js && node --check lib/printPipeline.js`
-- Tests: `node --test "test/*.test.js"` (**89/89 pass**). (The quoted glob is
+- Tests: `node --test "test/*.test.js"` (**90/90 pass**). (The quoted glob is
   required: `node --test test/` is not usable on this Node/Windows combination —
   it tries to load the directory as a module. The three files can also be listed
   explicitly.)
@@ -638,19 +648,21 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     leaving the queue and re-approval re-queuing it, listing/removing products
     with their bytes, deleting a group while keeping its products, and a stale
     T恤 selection falling back to every photo.
-  - `test/client-render.test.js` (8) builds the real client component tree with
+  - `test/client-render.test.js` (9) builds the real client component tree with
     a minimal React stand-in, covering both levels of 工作流 (the list, and a
     workflow's page with its settings, schedule, run history and log), the
     pipeline group panel (group list, the 225-call estimate, warnings, and all
     four result stages — asserted down to the image `src` each stage renders),
-    the 成品库 (the 商品 grid with its cover and counts, and a 商品's page:
-    back, counter, both arrows, the left shot rail, the 款式 switcher, the
-    source/commerce blocks — again down to each part's images), the mount-time
-    hydration (a behavioural test, so a module added to the load list but missed
-    on the mount path fails here instead of silently rendering empty), and that
-    the nav, `viewNames` and `viewEls` lists cannot drift apart (a mismatch shows
-    the wrong view under a nav label, silently and only after the insertion
-    point).
+    the 成品库 (the waterfall feed with its captions, every shot present, and the
+    reserved-ratio rule — a measured shot gets its real ratio, an unmeasured one
+    gets none rather than a guess; then a 商品's page: back, counter, both
+    arrows, the left shot rail, the 款式 switcher, the source/commerce blocks —
+    again down to each part's images; and that tapping a tile opens the page *on
+    that shot*), the mount-time hydration (a behavioural test, so a module added
+    to the load list but missed on the mount path fails here instead of silently
+    rendering empty), and that the nav, `viewNames` and `viewEls` lists cannot
+    drift apart (a mismatch shows the wrong view under a nav label, silently and
+    only after the insertion point).
 - The estimate was also run against this machine's **real** store contents
   (10 prompts, 1 T恤 with 3 photos, 228 scenes) in a throwaway copy: it resolves
   all four prompt names, selects all 3 款式, and reports 1 + 8 + 24 + 192 = 225
