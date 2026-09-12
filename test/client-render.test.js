@@ -481,7 +481,7 @@ function collectImgSrcsOf(node) {
   return found;
 }
 
-test("成品库 is a waterfall of finished shots, each captioned with its 商品 and 款式", () => {
+test("成品库 is a feed of 款式 — one card each, not one per shot", () => {
   const patched = CLIENT_SOURCE
     .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
     // The shelf shows a loading state until the fetch lands; with a single render
@@ -494,14 +494,15 @@ test("成品库 is a waterfall of finished shots, each captioned with its 商品
   const text = collectText(tree, []);
 
   const missing = [
-    ["3 张成片", "how many shots the shelf holds"],
-    ["商品A", "the 商品 name on a tile"],
-    ["#1", "which 款式 a tile belongs to"],
-    ["#2", "the other 款式"]
+    ["2 个款式", "how many 款式 the shelf holds"],
+    ["商品A", "the 商品 name on a card"],
+    ["#1", "which 款式 a card is"],
+    ["#2", "the other 款式"],
+    ["1/2", "how many shots that 款式 has, and which one is showing"]
   ].filter(function (entry) {
     return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
   }).map(function (entry) { return entry[0] + " — " + entry[1]; });
-  assert.deepEqual(missing, [], "the waterfall is missing something");
+  assert.deepEqual(missing, [], "the feed is missing something");
 
   // The caption is one short line at this tile size, so the full description
   // lives in the tooltip — and must still be there.
@@ -511,27 +512,30 @@ test("成品库 is a waterfall of finished shots, each captioned with its 商品
     if (Array.isArray(node)) { node.forEach(walk); return; }
     if (node.props && typeof node.props.title === "string") titles.push(node.props.title);
     walk(node.children);
-  })(render(loaded.view({}), 0));
-  assert.equal(titles.some(function (t) { return t.indexOf("第 1 轮") !== -1; }), true,
-    "the tile tooltip must still name the 商品, the 款式 and the pass");
+  })(tree);
+  assert.equal(titles.some(function (t) { return t.indexOf("张成片") !== -1; }), true,
+    "the card tooltip must still say which 商品 and 款式 it is, and how many shots it has");
 
-  // A waterfall, not a grid of covers: every shot is on the shelf.
-  const srcs = collectImgSrcsOf(tree);
-  ["a-1.png", "a-2.png", "b-1.png"].forEach(function (file) {
-    assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
-      file + " is not on the shelf (got " + srcs.length + " images)");
-  });
-  // The measured ratio is what reserves a tile's height; a guessed one would
-  // stretch the image, so an unmeasured product must get no ratio at all.
+  // ONE image per 款式. Three shots exist across two 款式, so the feed must show
+  // two tiles — the other shots of a 款式 live behind a swipe on its own card,
+  // not as tiles of their own, or the shelf is 192 near-identical images again.
+  const srcs = collectImgSrcsOf(tree).filter(function (src) { return /a-1\.png|a-2\.png|b-1\.png/.test(src); });
+  assert.equal(srcs.length, 2, "the feed must show one image per 款式, got " + JSON.stringify(srcs));
+  assert.equal(srcs.some(function (src) { return src.indexOf("a-1.png") !== -1; }), true, "the newest shot of 款式 #1 is its cover");
+  assert.equal(srcs.some(function (src) { return src.indexOf("a-2.png") !== -1; }), false, "the other shot of 款式 #1 must be behind a swipe");
+  assert.equal(srcs.some(function (src) { return src.indexOf("b-1.png") !== -1; }), true, "款式 #2 is its own card");
+
+  // The box comes from the measured ratio, so swiping never changes a card's
+  // height; an unmeasured 款式 falls back rather than being stretched by a guess.
   const ratios = [];
   (function walk(node) {
     if (node === null || node === undefined || typeof node !== "object") return;
     if (Array.isArray(node)) { node.forEach(walk); return; }
-    if (node.type === "img" && node.props && node.props.style) ratios.push(node.props.style.aspectRatio === undefined ? "none" : node.props.style.aspectRatio);
+    if (node.type === "img" && node.props && node.props.style) ratios.push(node.props.style.aspectRatio);
     walk(node.children);
   })(tree);
-  assert.equal(ratios.indexOf("600 / 800") !== -1, true, "a measured product must reserve its real ratio");
-  assert.equal(ratios.indexOf("none") !== -1, true, "an unmeasured product must reserve nothing rather than a guess");
+  assert.equal(ratios.indexOf("600 / 800") !== -1, true, "a measured 款式 must reserve its real ratio");
+  assert.equal(ratios.indexOf("3 / 4") !== -1, true, "an unmeasured 款式 falls back to the 3:4 the pipeline asks for");
 });
 
 test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 switcher", () => {
@@ -568,6 +572,28 @@ test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 s
     assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
       file + " is not rendered (got " + srcs.length + " images)");
   });
+
+  // The cover must be BOUNDED by its stage, never sized to the file. The page's
+  // first version used `width/height: 100%` inside an indefinite-height row, so
+  // the height resolved to the image's intrinsic one and the picture grew past
+  // the pane — it simply did not fit on screen.
+  const imgs = [];
+  (function walk(node) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.type === "img" && node.props) imgs.push({ src: String(node.props.src), style: node.props.style || {} });
+    walk(node.children);
+  })(tree);
+  assert.deepEqual(
+    imgs.filter(function (img) { return img.style.width === "100%" && img.style.height === "100%"; }),
+    [],
+    "no image may be sized 100%×100% inside an indefinite-height box"
+  );
+  assert.equal(
+    imgs.some(function (img) { return img.src.indexOf("a-1.png") !== -1 && img.style.maxHeight === "100%" && img.style.width === "auto"; }),
+    true,
+    "the cover must be capped by its stage so it always fits"
+  );
 });
 
 test("the 成品库 scroller is mounted in every state, so pagination can be rooted on it", () => {
