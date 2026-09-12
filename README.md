@@ -173,41 +173,62 @@ data already has that shape:
 | 款式 / SKU | 一个「二创T恤」（某张 T恤照片 × 某张二创印花） |
 | 款式图集 | 该款式的 8 张场景成片 |
 
-**The shelf shows one card per 款式 (SKU), and one image per card** — 4 across,
-newest first. A 款式's other shots are behind a **swipe**: drag the card left or
-right, or use its ‹ › arrows. Why one image per 款式 and not per shot: a 商品 has
-24 款式 × 8 shots = **192 near-identical images**, and a wall of those gives the
-eye nothing to compare. One card per 款式 makes the shelf a list of *things* — the
-shape of a real product listing, where you swipe the photo to see the rest. The
-card reserves its height from the first shot's ratio, so swiping never changes a
-card's height and the grid cannot jump. The 4-across count is fixed rather than
-width-derived: this shelf is for scanning, and a predictable tile size matters
-more here than filling the pane.
+**The shelf is shaped like a Taobao listing**, because a listing is where these
+goods are headed and the shelf exists to judge them as such. Each card is:
+a **square image stage** on a light ground (4 across, fixed count, newest first),
+then the title (`商品A · 款式 #1`), a strong spec line where Taobao puts the price
+(`8 张成片`), a row of small tags (`2 个场景` / `每场景 4 张` / `3:4`), and a hairline
+with the T恤 underneath — the closest thing this data has to a shop. The whole
+text block is clickable, not just the image.
 
-The images come back in whatever shape the model produced, and **a height is
-reserved only when the size was really measured** — taken from the header of the
-bytes the pipeline stored (`lib/imageSize.js`), never guessed, because a guessed
-ratio is what stretches an image; an unmeasured shot lays out at the 3:4 the
-换装+裂变 prompt asks for. Tiles mount a page at a time as a sentinel scrolls into
-view, and one 商品 can be filtered to via the chips. Distribution into columns is
-the same **round-robin into explicit columns** 场景图管理 uses (`distributeColumns`)
-— never CSS multi-column, which reorders and cannot be paginated.
+What is deliberately **not** copied: price, 销量 and 店铺评分. There is no such data
+here, and inventing numbers on a shelf used to decide what to publish would be
+worse than leaving the slot empty; a test asserts no price or sales figure can
+appear. Every line on the card is something the pipeline recorded.
 
-**Clicking a card opens a modal, not a page**: the cover large with ‹ › either
-side and a counter (`第 2 / 8 张`); **a rail of that 款式's other shots down the
-left**, click to switch; and on the right what the current shot is made of (the
-scene photo it used and the 二创T恤 it wears) plus the counts. Clicking the cover
-opens it in the shared lightbox, ← / → move between shots, any shot can be deleted
-from the modal, and Esc or the backdrop closes it. It is a modal rather than a
-page because a page would replace the shelf and lose the browsing context you just
-had; and it deliberately has **no 款式 strip** — switching 款式 is the shelf's job,
-and that row's height now belongs to the image.
+The stage is a fixed square with the shot **contained** — Taobao's tile without
+Taobao's crop. These are 3:4 shots and cropping one to a square cuts the garment;
+a square box also cannot jump as images load, which is what the old
+measured-ratio box was working around. Each 款式 shows **one** image: a 商品 with
+24 款式 would otherwise be 192 near-identical tiles and the eye would have
+nothing to compare. The rest of that 款式's shots are behind a swipe (drag the
+image, or use its ‹ › arrows).
+
+**Clicking a card opens a modal shaped like a Taobao product page.** The **left
+rail lists every 款式 of that 商品** — Taobao's SKU list, selected one outlined —
+so comparing two colourways no longer means closing the modal and finding another
+card. The middle is that 款式's gallery: big image, ‹ ›, a counter
+(`第 2 / 8 张`), click to zoom. The right column says what the shot is made of
+(the scene photo and the 二创T恤), shows **the 款式's whole contact sheet** as a
+40px grid (the rail used to do this job; now that it holds 款式, the shots need
+somewhere to be seen at a glance), and lists the product's own numbers. Arrow keys
+move between shots; Esc or the backdrop closes it.
+
+It is a modal rather than a page because a page would replace the shelf and lose
+the browsing context you just had, and it still has **no 款式 strip along the
+bottom** — the rail does that job without spending any of the image's height.
 
 It is deliberately **not** the same view as the workflow's group panel: the group
 panel is the operator's view (queue, cost estimate, all four stages including the
 intermediates), while this is the shelf of finished goods. The intermediates stay
 in their own modules — 印花原图库 / 二创印花 / T恤二创结果 — where they can be
 reused.
+
+The images come back in whatever shape the model produced; tiles mount a page at a
+time as a sentinel scrolls into view, and one 商品 can be filtered to via the
+chips. Distribution into columns is the same **round-robin into explicit columns**
+场景图管理 uses (`distributeColumns`) — never CSS multi-column, which reorders and
+cannot be paginated. The measured width/height are still stored and read
+(`lib/imageSize.js`): they label the card when they reduce to something a person
+would write (`3:4`).
+
+A shot record names its own 款式: `tshirtFile` (the composite, which *is* the
+款式's identity), `tshirtName` / `tshirtPhoto` (the T恤 it is a colourway of) and
+`printFile` (the 二创印花 it wears), plus `sceneIndex` / `variant`. Those four were
+added when the card became a listing; `scripts/backfill-output-fields.js` fills
+them on records written before that by looking the composite up in
+`tshirtRecreations` — nothing is inferred, it is idempotent, and it reports any
+shot whose row is gone rather than guessing.
 
 ## 印花流水线
 
@@ -595,6 +616,7 @@ selection click.
 | `lib/printPipeline.js` | Host | 印花流水线: the inbox scan and grouping, the T恤/prompt resolution, the four-step pipeline, its declared settings, the cost estimate, and resume-from-artefacts. The one workflow-specific module; keeping it out of the engine is what lets the engine stay generic. |
 | `lib/client.js` | Client | Registers the workbench as a `conversation.view` tab with React; all UI/state calls the host API. Also carries the workflow pages (list + detail) and the app-style 成品库 shelf, found by workflow id. No image processing here. |
 | `cordis.patch.yml` | Patch | Inserts the `ecommerce-workbench` bundle entry. |
+| `scripts/backfill-output-fields.js` | Repo tool | One-off, idempotent: names the 款式 on 成品 records written before those fields existed, by looking each shot's composite up in `tshirtRecreations`. Not part of the plugin (`package.json#files` excludes it) — it is a repair tool for the store on disk. |
 | `test/host-api.test.js` | Test | Drives the real handler + store through the full extract → recreate → delete → clear lifecycle (with the local provider), plus the workflow engine end to end: config, manual runs, failure, single-flight, scheduling, missed occurrences, retention, crash recovery, and persistence. |
 | `test/print-pipeline.test.js` | Test | Drives 印花流水线 through the real handler with a counting provider stub: the 225-call arithmetic, resume-instead-of-repay, the hard ceiling, missing-prompt reporting, the loose-files bucket, upload collision and traversal, approval gating, product deletion, and that deleting a group keeps what it produced. |
 | `test/client-render.test.js` | Test | Builds the real client component tree with a minimal React stand-in, covering the 工作流 empty state, list rows, the detail page's three tabs (settings, history, and that each tab's content stays on its own tab), the pipeline panel (group rows, the inline estimate and all four result stages) and the nav/view alignment invariant — the parts a syntax check cannot validate. |
@@ -701,11 +723,13 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     the pipeline group panel (group rows, the 225-call estimate and all four
     result stages rendered *inside the row they belong to* — asserted down to the
     image `src` each stage renders), the 成品库 (one card per 款式, the other shots
-    behind the swipe, and the reserved-ratio rule — a measured shot gets its real
-    ratio, an unmeasured one falls back to 3:4 rather than a guess; then the
-    modal: the fixed overlay, counter, both arrows, the left shot rail, the
-    source/commerce blocks and no 款式 strip — again down to each part's images;
-    and that clicking a card opens the 商品 *on the shot it was showing*), the
+    behind the swipe, every Taobao-card line — title, spec, tags, the T恤 — and
+    **no price or 销量**, since the shelf has no such data and must not invent it;
+    a square stage that contains rather than crops; then the modal: the fixed
+    overlay, the 款式 **rail** asserted to be a column and not a bottom strip, one
+    entry per 款式, the contact sheet, both arrows, the counter, the
+    source/commerce blocks — again down to each part's images; and that clicking a
+    card opens the 商品 *on the shot it was showing*), the
     mount-time hydration (a behavioural test, so a module added
     to the load list but missed on the mount path fails here instead of silently
     rendering empty), and that the nav, `viewNames` and `viewEls` lists cannot

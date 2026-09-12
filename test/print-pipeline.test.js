@@ -377,6 +377,19 @@ test("products can be listed and deleted one at a time, bytes included", async (
   assert.equal(listed.json.outputs.length, 5, "the limit is honoured");
   const first = listed.json.outputs[0];
 
+  // A shot names the 款式 it belongs to, not just the group it came from: the
+  // 成品库 renders a listing-shaped card (title / spec / tags / the T恤), and the
+  // last two of those only exist if the record carries them. The composite file
+  // is the 款式's identity; these fields are what it *is*.
+  const tshirtRow = (await store.read()).tshirtRecreations.filter(function (row) {
+    return (row.prints || []).some(function (print) { return print.file === first.tshirtFile; });
+  })[0];
+  assert.ok(tshirtRow, "the shot's composite must come from a 二创T恤 row");
+  assert.equal(first.tshirtName, tshirtRow.tshirtName, "the shot names its T恤");
+  assert.equal(first.tshirtPhoto, tshirtRow.tshirtFile, "and the T恤 photo that 款式 was made from");
+  assert.equal(first.printFile, tshirtRow.printFile, "and the 二创印花 it wears");
+  assert.equal(first.sceneIndex !== undefined, true, "and which scene it was shot in");
+
   const removed = await call(handler, "POST", "/ecom/api/workflow/output/delete", { id: first.id });
   assert.equal(removed.json.removed, true);
   assert.equal((await store.readOutputs()).outputs.length, 191);

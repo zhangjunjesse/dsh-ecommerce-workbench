@@ -534,9 +534,9 @@ test("the mount-time state load hydrates every module, 工作流 included", asyn
 
 /** Two 款式 under one 商品: t1 has two shots, t2 has one (never measured). */
 const DEMO_PRODUCTS = [
-  { id: "p1", groupKey: "商品A", groupName: "商品A", file: "a-1.png", tshirtFile: "t1.png", sceneFile: "s1.png", width: 600, height: 800, pass: 0, createdAt: 3 },
-  { id: "p2", groupKey: "商品A", groupName: "商品A", file: "a-2.png", tshirtFile: "t1.png", sceneFile: "s2.png", width: 600, height: 800, pass: 1, createdAt: 2 },
-  { id: "p3", groupKey: "商品A", groupName: "商品A", file: "b-1.png", tshirtFile: "t2.png", sceneFile: "s3.png", pass: 0, createdAt: 1 }
+  { id: "p1", groupKey: "商品A", groupName: "商品A", file: "a-1.png", tshirtFile: "t1.png", sceneFile: "s1.png", tshirtName: "180G女士纯棉T恤", width: 600, height: 800, sceneIndex: 0, createdAt: 3 },
+  { id: "p2", groupKey: "商品A", groupName: "商品A", file: "a-2.png", tshirtFile: "t1.png", sceneFile: "s2.png", tshirtName: "180G女士纯棉T恤", width: 600, height: 800, sceneIndex: 1, createdAt: 2 },
+  { id: "p3", groupKey: "商品A", groupName: "商品A", file: "b-1.png", tshirtFile: "t2.png", sceneFile: "s3.png", tshirtName: "180G女士纯棉T恤", sceneIndex: 0, createdAt: 1 }
 ];
 
 /** Every `src` in the rendered tree — images carry file names, text does not. */
@@ -551,7 +551,7 @@ function collectImgSrcsOf(node) {
   return found;
 }
 
-test("成品库 is a feed of 款式 — one card each, not one per shot", () => {
+test("成品库 is a feed of 款式 — one card each, shaped like a listing", () => {
   const patched = CLIENT_SOURCE
     .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
     // The shelf shows a loading state until the fetch lands; with a single render
@@ -563,28 +563,28 @@ test("成品库 is a feed of 款式 — one card each, not one per shot", () => 
   const tree = render(loaded.view({}), 0);
   const text = collectText(tree, []);
 
+  // Every line a Taobao card carries, filled with something we actually know:
+  // the title, a strong spec line where the price would be, the tag row, and the
+  // T恤 underneath as the closest thing this data has to a shop.
   const missing = [
     ["2 个款式", "how many 款式 the shelf holds"],
-    ["商品A", "the 商品 name on a card"],
-    ["#1", "which 款式 a card is"],
-    ["#2", "the other 款式"],
-    ["1/2", "how many shots that 款式 has, and which one is showing"]
+    ["商品A · 款式 #1", "the listing title: 商品 + 款式"],
+    ["款式 #2", "the other 款式, titled the same way"],
+    ["2 张成片", "the spec line, where a price would sit"],
+    ["1/2", "how many shots that 款式 has, and which one is showing"],
+    ["2 个场景", "the first tag: how many scenes it was shot in"],
+    ["每场景 1 张", "the second tag: how many shots per scene"],
+    ["3:4", "the measured ratio, as a tag"],
+    ["180G女士纯棉T恤", "the T恤 line, standing in for the shop"]
   ].filter(function (entry) {
     return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
   }).map(function (entry) { return entry[0] + " — " + entry[1]; });
   assert.deepEqual(missing, [], "the feed is missing something");
 
-  // The caption is one short line at this tile size, so the full description
-  // lives in the tooltip — and must still be there.
-  const titles = [];
-  (function walk(node) {
-    if (node === null || node === undefined || typeof node !== "object") return;
-    if (Array.isArray(node)) { node.forEach(walk); return; }
-    if (node.props && typeof node.props.title === "string") titles.push(node.props.title);
-    walk(node.children);
-  })(tree);
-  assert.equal(titles.some(function (t) { return t.indexOf("张成片") !== -1; }), true,
-    "the card tooltip must still say which 商品 and 款式 it is, and how many shots it has");
+  // No invented marketplace numbers. This shelf is used to decide what to
+  // publish, so a made-up price or 销量 would be worse than an empty slot.
+  assert.equal(/[¥￥]\s*\d/.test(text.join("|")), false, "the shelf must not show a price it does not have");
+  assert.equal(/人付款|销量|已售/.test(text.join("|")), false, "nor sales figures");
 
   // ONE image per 款式. Three shots exist across two 款式, so the feed must show
   // two tiles — the other shots of a 款式 live behind a swipe on its own card,
@@ -595,20 +595,33 @@ test("成品库 is a feed of 款式 — one card each, not one per shot", () => 
   assert.equal(srcs.some(function (src) { return src.indexOf("a-2.png") !== -1; }), false, "the other shot of 款式 #1 must be behind a swipe");
   assert.equal(srcs.some(function (src) { return src.indexOf("b-1.png") !== -1; }), true, "款式 #2 is its own card");
 
-  // The box comes from the measured ratio, so swiping never changes a card's
-  // height; an unmeasured 款式 falls back rather than being stretched by a guess.
-  const ratios = [];
+  // The tile is a fixed SQUARE with the shot contained, which is Taobao's shape
+  // *without* Taobao's crop: these are 3:4 shots and cropping one to a square
+  // cuts the garment. A square also cannot jump as images load, which is what
+  // the old measured-ratio box was working around.
+  const stages = [];
+  const feedImgs = [];
   (function walk(node) {
     if (node === null || node === undefined || typeof node !== "object") return;
     if (Array.isArray(node)) { node.forEach(walk); return; }
-    if (node.type === "img" && node.props && node.props.style) ratios.push(node.props.style.aspectRatio);
+    if (node.props && node.props.style && node.props.style.aspectRatio === "1 / 1") stages.push(node);
+    if (node.type === "img" && node.props) feedImgs.push({ src: String(node.props.src), style: node.props.style || {} });
     walk(node.children);
   })(tree);
-  assert.equal(ratios.indexOf("600 / 800") !== -1, true, "a measured 款式 must reserve its real ratio");
-  assert.equal(ratios.indexOf("3 / 4") !== -1, true, "an unmeasured 款式 falls back to the 3:4 the pipeline asks for");
+  assert.equal(stages.length, 2, "every card needs its own square stage, got " + stages.length);
+  assert.equal(
+    feedImgs.some(function (img) { return img.style.objectFit === "cover"; }),
+    false,
+    "nothing on the shelf may be cropped to fit"
+  );
+  assert.equal(
+    feedImgs.some(function (img) { return img.src.indexOf("a-1.png") !== -1 && img.style.maxWidth === "100%" && img.style.maxHeight === "100%"; }),
+    true,
+    "the shot must be bounded by its stage so it is letterboxed, never stretched"
+  );
 });
 
-test("a 商品 opens as a modal: cover, arrows, left rail — and no 款式 strip", () => {
+test("a 商品 opens as a modal: 款式 rail, cover, arrows, contact sheet — no bottom strip", () => {
   const patched = CLIENT_SOURCE
     .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
     // Seeded too: with `loading` still true the feed never renders, and the modal
@@ -629,6 +642,7 @@ test("a 商品 opens as a modal: cover, arrows, left rail — and no 款式 stri
     ["›", "the next-shot arrow"],
     ["点击图片可全屏放大", "that the cover itself can be enlarged"],
     ["这一张的来源", "what the shot is made of"],
+    ["这个款式的图集", "the contact sheet, now that the rail holds 款式"],
     ["商品信息", "the product block"],
     ["删除这张", "removing a shot"]
   ].filter(function (entry) {
@@ -636,16 +650,37 @@ test("a 商品 opens as a modal: cover, arrows, left rail — and no 款式 stri
   }).map(function (entry) { return entry[1]; });
   assert.deepEqual(missing, [], "the product modal is missing something");
 
-  // Every part of the modal must actually render its images: the left rail of
-  // this 款式's shots, the cover, and the two references. t2.png (the OTHER
-  // 款式's composite) is deliberately absent — the modal shows one 款式 only.
+  // Every part of the modal must actually render its images: the cover, the two
+  // references, and the contact sheet. t2.png (the OTHER 款式's composite) now
+  // belongs in the 款式 rail — that is the whole point of the rail — but it must
+  // never be the cover.
   const srcs = collectImgSrcsOf(tree);
   ["a-1.png", "a-2.png", "b-1.png", "t1.png", "s1.png"].forEach(function (file) {
     assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
       file + " is not rendered (got " + JSON.stringify(srcs) + ")");
   });
-  assert.equal(srcs.some(function (src) { return src.indexOf("t2.png") !== -1; }), false,
-    "a 款式 that is not open must not be rendered at all");
+  assert.equal(srcs.filter(function (src) { return src.indexOf("t2.png") !== -1; }).length, 1,
+    "the other 款式 must appear exactly once — in the rail, not as content");
+
+  // The rail is a rail, not the bottom strip the user had removed: one entry per
+  // 款式, stacked in a COLUMN. A horizontal row of 款式 was rejected because it
+  // spent the image's height; asserting the direction is how that stays true.
+  let rail = null;
+  (function walk(node) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    const kids = Array.isArray(node.children) ? node.children : (node.children ? [node.children] : []);
+    const holdsStyles = kids.some(function (kid) {
+      return kid && kid.type === "button" && JSON.stringify(kid).indexOf("t1.png") !== -1;
+    });
+    if (holdsStyles) rail = rail || node;
+    walk(node.children);
+  })(tree);
+  assert.ok(rail, "the modal must render a rail holding the 款式 thumbnails");
+  assert.equal(rail.props.style.flexDirection, "column", "the 款式 list must be a vertical rail, not a bottom strip");
+  const railEntries = (Array.isArray(rail.children) ? rail.children : [rail.children])
+    .filter(function (kid) { return kid && kid.type === "button"; });
+  assert.equal(railEntries.length, 2, "one rail entry per 款式, got " + railEntries.length);
 
   // The cover must be BOUNDED by its stage, never sized to the file. The page's
   // first version used `width/height: 100%` inside an indefinite-height row, so
@@ -694,12 +729,10 @@ test("a 商品 opens as a modal: cover, arrows, left rail — and no 款式 stri
     "there must be a visible close affordance"
   );
 
-  // No 款式 strip: switching 款式 is the shelf's job, and that row's height now
-  // belongs to the image. Asserted on the modal subtree only — the feed behind it
-  // legitimately shows one card per 款式.
+  // No 款式 strip *along the bottom* — asserted as structure (above), not as
+  // text: 款式 legitimately appears now that the rail lists them, and the info
+  // block still has to say which one is showing.
   const modalText = collectText(overlay, []);
-  assert.equal(modalText.indexOf("款式"), -1, "the 款式 strip's own label must be gone from the modal");
-  assert.equal(modalText.indexOf("#1"), -1, "so must its per-款式 tiles");
   assert.equal(
     modalText.some(function (line) { return line.indexOf("款式：") !== -1; }),
     true,
