@@ -625,6 +625,36 @@ test("the 成品库 scroller is mounted in every state, so pagination can be roo
   assert.equal(feedCount(loadedState, { __DEMO_PRODUCTS__: DEMO_PRODUCTS }), 1, "when loaded, the scroller must be mounted");
 });
 
+test("clicking a card opens its 商品 (not its own composite key)", () => {
+  // Walking the actual click path, which the other 成品库 tests skip by seeding
+  // the open state directly. That gap let a real bug through: the card passed its
+  // composite `group|style` key where the 商品 key was expected, so the page
+  // lookup missed and clicking a card did nothing at all.
+  const patched = CLIENT_SOURCE
+    .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
+    .replace("var loadingState = React.useState(true);", "var loadingState = React.useState(false);");
+  const loaded = loadClient(patched, { __DEMO_PRODUCTS__: DEMO_PRODUCTS });
+  const tree = render(loaded.view({}), 0);
+
+  let cover = null;
+  (function walk(node) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.type === "img" && node.props && String(node.props.src).indexOf("a-1.png") !== -1) cover = node;
+    walk(node.children);
+  })(tree);
+  assert.ok(cover, "the feed must render a card cover to click");
+  assert.equal(typeof cover.props.onClick, "function", "the cover must be clickable");
+
+  cover.props.onClick();
+  const opened = loaded.stateCalls.filter(function (value) {
+    return value && typeof value === "object" && value.groupKey !== undefined;
+  });
+  assert.equal(opened.length, 1, "clicking must ask to open exactly one page");
+  assert.equal(opened[0].groupKey, "商品A", "it must open the 商品, not the card's composite key");
+  assert.equal(opened[0].shotId, "p1", "and land on the shot the card is showing");
+});
+
 test("tapping a shot in the waterfall opens its 商品 on that shot", () => {
   // The tile knows which shot it is; the page must not drop that on the floor and
   // open on the first shot of the 款式 instead.
