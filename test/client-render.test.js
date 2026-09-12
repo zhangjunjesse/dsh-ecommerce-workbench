@@ -559,6 +559,35 @@ test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 s
   });
 });
 
+test("the 成品库 scroller is mounted in every state, so the feed can measure its columns", () => {
+  // The bug this guards, and why nothing else caught it: the column count is
+  // measured from the scroller on the first mount, so a scroller that is only
+  // rendered *after* the products arrive is measured as absent — and the feed
+  // then stays one column wide with every tile stretched to the full width of
+  // the pane. No assertion about tiles or text can see that: the tiles are all
+  // there, they are just enormous.
+  function feedCount(source, demo) {
+    const loaded = loadClient(source, demo);
+    const tree = render(loaded.view({}), 0);
+    let found = 0;
+    (function walk(node) {
+      if (node === null || node === undefined || typeof node !== "object") return;
+      if (Array.isArray(node)) { node.forEach(walk); return; }
+      if (node.props && node.props["data-ecom-feed"] === "products") found++;
+      walk(node.children);
+    })(tree);
+    return found;
+  }
+
+  const seeded = CLIENT_SOURCE.replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);");
+  const loadedState = seeded.replace("var loadingState = React.useState(true);", "var loadingState = React.useState(false);");
+  const emptyState = loadedState.replace("var productsState = React.useState(__DEMO_PRODUCTS__);", "var productsState = React.useState([]);");
+
+  assert.equal(feedCount(CLIENT_SOURCE, {}), 1, "while loading, the scroller must already be mounted");
+  assert.equal(feedCount(emptyState, {}), 1, "when empty, the scroller must still be mounted");
+  assert.equal(feedCount(loadedState, { __DEMO_PRODUCTS__: DEMO_PRODUCTS }), 1, "when loaded, the scroller must be mounted");
+});
+
 test("tapping a shot in the waterfall opens its 商品 on that shot", () => {
   // The tile knows which shot it is; the page must not drop that on the floor and
   // open on the first shot of the 款式 instead.
