@@ -3,14 +3,15 @@
 A DSH plugin that renders a local e-commerce design workbench as the profile's
 primary UI, so opening DSH lands on the workbench. Ships **印花管理** (印花提取 +
 印花二创, real generation) and **T恤二创** (apply a print onto a T恤, real
-generation) as the print pipeline, plus **工作流** (schedule and trigger
-automation, and read its run logs — it ships with **印花流水线**, the four-step
-batch pipeline, already registered) directly beneath 印花二创; below a divider sit
-the non-pipeline items: **通用工作台** (free-form prompt + reference images →
-outputs, the daily driver), **T恤管理** (upload and manage multiple reference
-photos per T恤, no generation), **提示词管理** (saved prompts, pickable from
-every composer) and **场景图管理** (paste scene photos straight into a masonry
-pool, no generation).
+generation) as the print pipeline; then **工作流** (a list plus one page per
+workflow — its settings, the work it owns, and every run it has made; ships with
+**印花流水线**, the four-step batch pipeline, already registered) and **成品库**
+(the finished shelf, browsed like a shopping app) directly beneath it; below a
+divider sit the non-pipeline items: **通用工作台** (free-form prompt + reference
+images → outputs, the daily driver), **T恤管理** (upload and manage multiple
+reference photos per T恤, no generation), **提示词管理** (saved prompts, pickable
+from every composer) and **场景图管理** (paste scene photos straight into a
+masonry pool, no generation).
 
 The workbench is backed by a real Host API that persists to disk: images are
 uploaded, stored as files, and their metadata is kept in `state.json`. Image
@@ -160,11 +161,47 @@ also returns `workflows`: one entry per registered definition, merged from the
 registry (what exists in code) and the store (what the user changed about it),
 plus its live running state.
 
+## 成品库
+
+The finished shelf, one level below 工作流 in the nav. It shows what the pipeline
+actually produced, browsed the way a shopping app shows a listing, because the
+data already has that shape:
+
+| 电商 | 这里 |
+|---|---|
+| 商品 | 一个参考图分组 |
+| 款式 / SKU | 一个「二创T恤」（某张 T恤照片 × 某张二创印花） |
+| 款式图集 | 该款式的 8 张场景成片 |
+
+**The shelf** is a grid of 商品 cards: cover image, how many shots, how many
+款式, when it was last produced.
+
+**A 商品 opens as a product page**: the cover image large in the middle with ‹ ›
+either side and a counter (`1 / 8`); **a rail of that 款式's other shots down the
+left**, click to switch; the 款式 switcher underneath as a horizontal strip of
+二创T恤 thumbnails; and on the right what the current shot is made of (the scene
+photo it used and the 二创T恤 it wears) plus the counts. Clicking the cover opens
+it in the shared lightbox, ← / → move between shots, and any shot can be deleted
+from the page.
+
+It is deliberately **not** the same view as the workflow's group panel: the group
+panel is the operator's view (queue, cost estimate, all four stages including the
+intermediates), while this is the shelf of finished goods. The intermediates stay
+in their own modules — 印花原图库 / 二创印花 / T恤二创结果 — where they can be
+reused.
+
 ## 印花流水线
 
 The workbench's first real workflow (`print.pipeline`, `lib/printPipeline.js`): a
 **group of reference screenshots** goes in, finished products come out, with no
-per-step button pressing. Open 工作流 → 「分组与成品」.
+per-step button pressing. Open 工作流 → 印花流水线 (the row) → its page.
+
+The 工作流 module is **a list and a page**: the list says which workflows exist
+and how each last went; opening one gives that workflow its own page — its
+settings (enable, schedule, manual trigger), the work it owns (for the pipeline:
+the queue of reference groups and the cost estimate), and its complete run
+history with each run's log. Nothing is expanded inline inside a card; a
+workflow's page is where everything about it lives.
 
 ```
 一组参考图（同一商品的多个角度截图）
@@ -242,9 +279,10 @@ into a **separate product library** (`workflow-outputs.json`,
 `GET /ecom/api/workflow/outputs`). That separation is not tidiness: 场景图管理 is
 the *reference* pool this step draws its random scene from, so putting the
 outputs back into it would mean later runs picking the pipeline's own products as
-scene references, degrading every generation after the first. The 「分组与成品」
-panel shows all four stages and can delete any of them (steps 1–3 delete through
-their own modules' records, step 4 through the product library).
+scene references, degrading every generation after the first. The workflow's page
+shows all four stages per group and can delete any of them (steps 1–3 delete
+through their own modules' records, step 4 through the product library); the
+finished step-4 products are also browsable in 成品库.
 
 **Failure semantics.** Each item is caught independently and persisted the moment
 it succeeds, so one bad call never discards the rest of the batch. A run that had
@@ -499,7 +537,7 @@ selection click.
 | `lib/workflowRunner.js` | Host | Executes a workflow and records every attempt: run records, log capture and caps, one-run-per-workflow, history retention, crash recovery, run params, and the concurrency-guarded provider a workflow is allowed to see. |
 | `lib/scheduler.js` | Host | Schedule shapes and arithmetic (interval / daily), the in-process tick, and missed-occurrence detection. Pure time logic plus a timer — no workflow knowledge. |
 | `lib/printPipeline.js` | Host | 印花流水线: the inbox scan and grouping, the T恤/prompt resolution, the four-step pipeline, the cost estimate, and resume-from-artefacts. The one workflow-specific module; keeping it out of the engine is what lets the engine stay generic. |
-| `lib/client.js` | Client | Registers the workbench as a `conversation.view` tab with React; all UI/state calls the host API. Also carries the pipeline's own panels (groups, estimate, four-stage results), found by workflow id. No image processing here. |
+| `lib/client.js` | Client | Registers the workbench as a `conversation.view` tab with React; all UI/state calls the host API. Also carries the workflow pages (list + detail) and the app-style 成品库 shelf, found by workflow id. No image processing here. |
 | `cordis.patch.yml` | Patch | Inserts the `ecommerce-workbench` bundle entry. |
 | `test/host-api.test.js` | Test | Drives the real handler + store through the full extract → recreate → delete → clear lifecycle (with the local provider), plus the workflow engine end to end: config, manual runs, failure, single-flight, scheduling, missed occurrences, retention, crash recovery, and persistence. |
 | `test/print-pipeline.test.js` | Test | Drives 印花流水线 through the real handler with a counting provider stub: the 225-call arithmetic, resume-instead-of-repay, the hard ceiling, missing-prompt reporting, the loose-files bucket, upload collision and traversal, approval gating, product deletion, and that deleting a group keeps what it produced. |
@@ -562,7 +600,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 ## Verify
 
 - Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js && node --check lib/printPipeline.js`
-- Tests: `node --test "test/*.test.js"` (**85/85 pass**). (The quoted glob is
+- Tests: `node --test "test/*.test.js"` (**89/89 pass**). (The quoted glob is
   required: `node --test test/` is not usable on this Node/Windows combination —
   it tries to load the directory as a module. The three files can also be listed
   explicitly.)
@@ -600,19 +638,25 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     leaving the queue and re-approval re-queuing it, listing/removing products
     with their bytes, deleting a group while keeping its products, and a stale
     T恤 selection falling back to every photo.
-  - `test/client-render.test.js` (4) builds the real client component tree with
-    a minimal React stand-in: the 工作流 empty state, the cards/controls/log
-    panel with every run status, the pipeline panel (group list, the 225-call
-    estimate, warnings, and all four result stages — asserted down to the image
-    `src` each stage renders), and that the nav, `viewNames` and `viewEls` lists
-    cannot drift apart (a mismatch shows the wrong view under a nav label,
-    silently and only after the insertion point).
+  - `test/client-render.test.js` (8) builds the real client component tree with
+    a minimal React stand-in, covering both levels of 工作流 (the list, and a
+    workflow's page with its settings, schedule, run history and log), the
+    pipeline group panel (group list, the 225-call estimate, warnings, and all
+    four result stages — asserted down to the image `src` each stage renders),
+    the 成品库 (the 商品 grid with its cover and counts, and a 商品's page:
+    back, counter, both arrows, the left shot rail, the 款式 switcher, the
+    source/commerce blocks — again down to each part's images), the mount-time
+    hydration (a behavioural test, so a module added to the load list but missed
+    on the mount path fails here instead of silently rendering empty), and that
+    the nav, `viewNames` and `viewEls` lists cannot drift apart (a mismatch shows
+    the wrong view under a nav label, silently and only after the insertion
+    point).
 - The estimate was also run against this machine's **real** store contents
   (10 prompts, 1 T恤 with 3 photos, 228 scenes) in a throwaway copy: it resolves
   all four prompt names, selects all 3 款式, and reports 1 + 8 + 24 + 192 = 225
   calls with **zero warnings** and nothing generated.
-- Both test files were run repeatedly (30× host, 8× both) to confirm the suite
-  is stable. Two races that used to flake are fixed rather than tolerated: the
+- The suites were run repeatedly (30× host, 8× all three) to confirm they are
+  stable. Two races that used to flake are fixed rather than tolerated: the
   generation jobs published `done` before awaiting their `store.update`, and
   `/ecom/api/state` could combine a config snapshot with a separately-taken
   in-memory snapshot and report a finished workflow run as still running.

@@ -182,36 +182,89 @@ test("workflow cards render their schedule, controls and every run status", () =
   };
 
   const patched = CLIENT_SOURCE
-    .replace("var workflowsState = React.useState([]);", "var workflowsState = React.useState(__DEMO_WORKFLOWS__);")
-    .replace("var openState = React.useState(null);", "var openState = React.useState(__DEMO_WORKFLOWS__[0].id);")
-    .replace("var runsState = React.useState([]);", "var runsState = React.useState(__DEMO_RUNS__);")
-    .replace("var detailState = React.useState(null);", "var detailState = React.useState(__DEMO_RUN__);");
-  // Guard the guard: if these stop matching (the code was refactored), this test
-  // would quietly render the empty state and still "pass".
-  assert.notEqual(patched, CLIENT_SOURCE, "the in-memory seed no longer applies — update it");
+    .replace("var workflowsState = React.useState([]);", "var workflowsState = React.useState(__DEMO_WORKFLOWS__);");
+  // Guard the guard: if the seed stops matching (the code was refactored), this
+  // test would quietly render something else and still "pass".
   assert.match(patched, /useState\(__DEMO_WORKFLOWS__\)/);
 
   const text = renderWorkbench(patched, {
     __DEMO_WORKFLOWS__: demo.workflows,
-    __DEMO_RUNS__: demo.runs,
-    __DEMO_RUN__: demo.run
+    __DEMO_RUNS__: [],
+    __DEMO_RUN__: null
   });
   const missing = [
     ["示例同步", "a workflow's name"],
-    ["把二创印花同步到外部目录", "its description"],
-    ["已启用", "an enabled workflow's toggle"],
-    ["已停用", "a disabled workflow's toggle"],
-    ["运行中…", "a workflow whose run is in flight"],
-    ["每 30 分钟", "an interval schedule in words"],
-    ["每天 09:00", "a daily schedule in words"],
-    ["开始同步", "a log line of the selected run"],
-    ["结果：同步 3 个文件", "the selected run's summary"],
-    ["已跳过", "a skipped run in the history"],
-    ["DSH 未运行期间错过了这次调度", "why that run was skipped"]
+    ["把二创印花同步到外部目录", "its description"]
   ].filter(function (entry) {
     return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
   }).map(function (entry) { return entry[1]; });
-  assert.deepEqual(missing, [], "nothing the user needs is missing from the rendered UI");
+  // The list shows every workflow with its live status and a way in.
+  missing.push.apply(missing, [
+    ["每日备份", "a second workflow"],
+    ["正在跑的", "a third workflow"],
+    ["已停用", "a disabled workflow"],
+    ["成功", "a workflow whose last run succeeded"],
+    ["失败", "a workflow whose last run failed"],
+    ["进入", "the way into a workflow's page"]
+  ].filter(function (entry) {
+    return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
+  }).map(function (entry) { return entry[1]; }));
+  assert.deepEqual(missing, [], "nothing the user needs is missing from the workflow list");
+});
+
+test("a workflow's page renders its settings, schedule and run history", () => {
+  const now = Date.now();
+  const workflow = {
+    id: "demo.sync", name: "示例同步", description: "把二创印花同步到外部目录",
+    enabled: true, schedule: { type: "interval", everyMinutes: 30 }, nextRunAt: now + 1800000,
+    lastRunAt: now - 60000, lastRunId: "run-a", lastStatus: "success", running: false, runId: null
+  };
+  const runs = [
+    { id: "run-a", workflowId: "demo.sync", workflowName: "示例同步", trigger: "manual", status: "success", startedAt: now - 60000, finishedAt: now - 58000, durationMs: 2000, error: null, summary: "同步 3 个文件", skippedReason: null, logCount: 2 },
+    { id: "run-b", workflowId: "demo.sync", workflowName: "示例同步", trigger: "schedule", status: "skipped", startedAt: now - 7200000, finishedAt: now - 7200000, durationMs: 0, error: null, summary: null, skippedReason: "DSH 未运行期间错过了这次调度，已跳过（不补跑）。", logCount: 1 }
+  ];
+  const run = {
+    id: "run-a", workflowId: "demo.sync", workflowName: "示例同步", trigger: "manual", status: "success",
+    startedAt: now - 60000, finishedAt: now - 58000, durationMs: 2000,
+    error: null, summary: "同步 3 个文件", skippedReason: null,
+    logs: [
+      { t: now - 59000, level: "info", message: "开始同步" },
+      { t: now - 58500, level: "warn", message: "有 1 个文件已存在，跳过" }
+    ]
+  };
+
+  const patched = CLIENT_SOURCE
+    .replace("var workflowsState = React.useState([]);", "var workflowsState = React.useState(__DEMO_WORKFLOWS__);")
+    // The list is a list; everything you can do lives on the page, so open it.
+    // Anchored on `detailId` because `detailState` is also the selected run's.
+    .replace(
+      /var detailState = React\.useState\(null\);\s*\n\s*var detailId = detailState\[0\];/,
+      "var detailState = React.useState(__DEMO_WORKFLOWS__[0].id);\n        var detailId = detailState[0];"
+    )
+    .replace("var runsState = React.useState([]);", "var runsState = React.useState(__DEMO_RUNS__);")
+    .replace("var detailState = React.useState(null);", "var detailState = React.useState(__DEMO_RUN__);");
+  assert.match(patched, /useState\(__DEMO_WORKFLOWS__\[0\]\.id\)/, "the seed for the open workflow page no longer applies");
+
+  const text = renderWorkbench(patched, {
+    __DEMO_WORKFLOWS__: [workflow],
+    __DEMO_RUNS__: runs,
+    __DEMO_RUN__: run
+  });
+  const missing = [
+    ["← 返回工作流", "the way back to the list"],
+    ["示例同步", "the workflow's name"],
+    ["已启用", "its enabled state"],
+    ["每 30 分钟", "its schedule in words"],
+    ["下次运行", "when it runs next"],
+    ["运行记录", "the history section"],
+    ["已跳过", "a skipped run in the history"],
+    ["DSH 未运行期间错过了这次调度", "why that run was skipped"],
+    ["开始同步", "a log line of the selected run"],
+    ["结果：同步 3 个文件", "the selected run's summary"]
+  ].filter(function (entry) {
+    return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
+  }).map(function (entry) { return entry[1]; });
+  assert.deepEqual(missing, [], "nothing the user needs is missing from the workflow page");
 });
 
 test("the workbench nav and its view list cannot drift apart", () => {
@@ -286,7 +339,11 @@ test("the pipeline panel renders its groups, estimate and four result stages", (
     .replace("var libraryState = React.useState([]);", "var libraryState = React.useState(__DEMO_LIBRARY__);")
     .replace("var recreationsState = React.useState([]);", "var recreationsState = React.useState(__DEMO_RECREATIONS__);")
     .replace("var tshirtRecreationsState = React.useState([]);", "var tshirtRecreationsState = React.useState(__DEMO_TSHIRT_RECREATIONS__);")
-    .replace("var groupsOpenState = React.useState(null);", "var groupsOpenState = React.useState(__DEMO_WORKFLOWS__[0].id);")
+    // Open the pipeline's page, where its queue and estimate now live.
+    .replace(
+      /var detailState = React\.useState\(null\);\s*\n\s*var detailId = detailState\[0\];/,
+      "var detailState = React.useState(__DEMO_WORKFLOWS__[0].id);\n        var detailId = detailState[0];"
+    )
     .replace("var groupsState = React.useState([]);", "var groupsState = React.useState(__DEMO_GROUPS__);")
     .replace("var inboxState = React.useState(\"\");", "var inboxState = React.useState(__DEMO_INBOX__);")
     .replace("var estimateState = React.useState(null);", "var estimateState = React.useState(__DEMO_ESTIMATE__);")
@@ -397,5 +454,92 @@ test("the mount-time state load hydrates every module, 工作流 included", asyn
   ["setLibrary(state.library", "setScenes(state.scenes", "setWorkflows(state.workflows"].forEach(function (marker) {
     const occurrences = CLIENT_SOURCE.split(marker + " || [])").length - 1;
     assert.equal(occurrences, 1, marker + " appears " + occurrences + " times — the hydration list has been duplicated");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 成品库 — the finished shelf. Its shape is the data's own: a reference group
+// is a 商品, each 二创T恤 is a 款式, and that 款式's 场景成片 are its gallery.
+// ---------------------------------------------------------------------------
+
+/** Two 款式 under one 商品: t1 has two shots, t2 has one. */
+const DEMO_PRODUCTS = [
+  { id: "p1", groupKey: "商品A", groupName: "商品A", file: "a-1.png", tshirtFile: "t1.png", sceneFile: "s1.png", createdAt: 3 },
+  { id: "p2", groupKey: "商品A", groupName: "商品A", file: "a-2.png", tshirtFile: "t1.png", sceneFile: "s2.png", createdAt: 2 },
+  { id: "p3", groupKey: "商品A", groupName: "商品A", file: "b-1.png", tshirtFile: "t2.png", sceneFile: "s3.png", createdAt: 1 }
+];
+
+/** Every `src` in the rendered tree — images carry file names, text does not. */
+function collectImgSrcsOf(node) {
+  const found = [];
+  (function walk(current) {
+    if (current === null || current === undefined || typeof current !== "object") return;
+    if (Array.isArray(current)) { current.forEach(walk); return; }
+    if (current.type === "img" && current.props && current.props.src) found.push(String(current.props.src));
+    walk(current.children);
+  })(node);
+  return found;
+}
+
+test("成品库 lists each 商品 as a cover card with its counts", () => {
+  const patched = CLIENT_SOURCE
+    .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
+    // The shelf shows a loading state until the fetch lands; with a single render
+    // pass it would never get past it, so the loaded state is seeded too.
+    .replace("var loadingState = React.useState(true);", "var loadingState = React.useState(false);");
+  assert.match(patched, /useState\(__DEMO_PRODUCTS__\)/, "the product seed no longer applies — update it");
+
+  const loaded = loadClient(patched, { __DEMO_PRODUCTS__: DEMO_PRODUCTS });
+  const tree = render(loaded.view({}), 0);
+  const text = collectText(tree, []);
+
+  const missing = [
+    ["1 个商品 · 3 张成片", "the shelf summary"],
+    ["商品A", "the 商品 name"],
+    ["3 张", "how many shots the 商品 has"],
+    ["2 个款式", "how many 款式 it has"]
+  ].filter(function (entry) {
+    return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
+  }).map(function (entry) { return entry[0] + " — " + entry[1]; });
+  assert.deepEqual(missing, [], "the 商品 grid is missing something");
+
+  // The card shows a cover, not just a label.
+  assert.equal(collectImgSrcsOf(tree).some(function (src) { return src.indexOf("a-1.png") !== -1; }), true,
+    "the 商品 card must show a cover image");
+});
+
+test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 switcher", () => {
+  const patched = CLIENT_SOURCE
+    .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
+    .replace("var openState = React.useState(null);", "var openState = React.useState(__DEMO_OPEN__);");
+  assert.match(patched, /useState\(__DEMO_OPEN__\)/, "the open-商品 seed no longer applies — update it");
+
+  const loaded = loadClient(patched, { __DEMO_PRODUCTS__: DEMO_PRODUCTS, __DEMO_OPEN__: "商品A" });
+  const tree = render(loaded.view({}), 0);
+  const text = collectText(tree, []);
+
+  const missing = [
+    ["← 返回成品库", "the way back to the shelf"],
+    ["2 个款式 · 3 张成片", "the page summary"],
+    ["1 / 2", "the shot counter, so the arrows mean something"],
+    ["‹", "the previous-shot arrow"],
+    ["›", "the next-shot arrow"],
+    ["款式", "the 款式 switcher"],
+    ["这一张的来源", "what the shot is made of"],
+    ["商品信息", "the product block"],
+    ["删除这张", "removing a shot"],
+    ["#1", "a 款式 entry"],
+    ["#2", "the other 款式 entry"]
+  ].filter(function (entry) {
+    return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
+  }).map(function (entry) { return entry[1]; });
+  assert.deepEqual(missing, [], "the product page is missing something");
+
+  // Every part of the page must actually render its images: the left rail of
+  // this 款式's shots, the cover, the 款式 switcher, and the two references.
+  const srcs = collectImgSrcsOf(tree);
+  ["a-1.png", "a-2.png", "t1.png", "t2.png", "s1.png"].forEach(function (file) {
+    assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
+      file + " is not rendered (got " + srcs.length + " images)");
   });
 });
