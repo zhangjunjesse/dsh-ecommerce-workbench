@@ -570,13 +570,13 @@ test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 s
   });
 });
 
-test("the 成品库 scroller is mounted in every state, so the feed can measure its columns", () => {
-  // The bug this guards, and why nothing else caught it: the column count is
-  // measured from the scroller on the first mount, so a scroller that is only
-  // rendered *after* the products arrive is measured as absent — and the feed
-  // then stays one column wide with every tile stretched to the full width of
-  // the pane. No assertion about tiles or text can see that: the tiles are all
-  // there, they are just enormous.
+test("the 成品库 scroller is mounted in every state, so pagination can be rooted on it", () => {
+  // Why this needs its own assertion: the pagination sentinel observes the
+  // scroll container, so a container that only appears once the products arrive
+  // leaves the sentinel with nothing to observe. (This guard was written when
+  // the same mistake also collapsed the feed to a single, enormous column — the
+  // tiles were all present and correct, only their size was wrong, which is
+  // invisible to any assertion about content.)
   function feedCount(source, demo) {
     const loaded = loadClient(source, demo);
     const tree = render(loaded.view({}), 0);
