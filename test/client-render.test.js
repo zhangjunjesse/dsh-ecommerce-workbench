@@ -31,8 +31,10 @@ const CLIENT_SOURCE = readFileSync(join(__dirname, "..", "lib", "client.js"), "u
 function makeReactStub(options) {
   const settings = options || {};
   const stateCalls = [];
+  const cleanups = [];
   return {
     Fragment: "Fragment",
+    effectCleanups: cleanups,
     createElement: function (type, props) {
       const children = Array.prototype.slice.call(arguments, 2);
       const merged = Object.assign({}, props);
@@ -50,9 +52,13 @@ function makeReactStub(options) {
     // needs to exercise the mount path opts in. A throwing effect is swallowed:
     // effects here assume a real browser, and the assertions that matter are on
     // the state setters the effect calls before it could ever reach that point.
+    // Cleanups are collected so a test can simulate unmount.
     useEffect: function (fn) {
       if (settings.runEffects !== true) return;
-      try { fn(); } catch (error) { /* browser-only effect body */ }
+      try {
+        const cleanup = fn();
+        if (typeof cleanup === "function") cleanups.push(cleanup);
+      } catch (error) { /* browser-only effect body */ }
     },
     useLayoutEffect: function () {},
     useRef: function (initial) { return { current: initial === undefined ? null : initial }; },
@@ -111,7 +117,13 @@ function loadClient(source, demo, options) {
     return Promise.resolve({ json: function () { return Promise.resolve({ ok: true }); } });
   };
   let captured = null;
-  const fakeWindow = { __ModuleLoader__: { load: function (mod) { captured = mod; } } };
+  const fakeWindow = {
+    __ModuleLoader__: { load: function (mod) { captured = mod; } },
+    // The plugin listens for resize to re-place the overlay pill; a no-op here
+    // keeps its effect body runnable in Node.
+    addEventListener: function () {},
+    removeEventListener: function () {}
+  };
   function shim(name) {
     if (name === "react") return react;
     throw new Error("unexpected require(" + name + ")");
@@ -139,7 +151,7 @@ function loadClient(source, demo, options) {
   };
   mod.apply({ get: function (key) { return key === "slots" ? slots : null; } });
   assert.equal(typeof registered, "function", "the workbench registered no conversation view");
-  return { view: registered, entries: entries, injected: injected, stateCalls: react.stateCalls };
+  return { view: registered, entries: entries, injected: injected, stateCalls: react.stateCalls, effectCleanups: react.effectCleanups };
 }
 
 /** Render the whole workbench once and return every string it produced. */
@@ -387,6 +399,68 @@ test("the composer can be collapsed from a shell.overlay pill", () => {
     "collapsing is only legitimate through the seat the conversation UI declares");
   assert.equal(render(loadClient(CLIENT_SOURCE, {}, { runEffects: true }).entries["shell.overlay:ecom-composer-toggle"]({}), 0) !== null, true,
     "the pill must render even when there is no document (the effect body guards on it)");
+});
+
+test("collapsing hides the seat the shell declares, and unmounting gives it back", () => {
+  // The collapse writes to an element this plugin does not own, so it is the
+  // riskiest part of the feature and gets a real (if hand-rolled) DOM rather than
+  // a promise that the browser will like it. What is asserted: the seat the shell
+  // marks is the one hidden, the previous inline style is remembered rather than
+  // assumed, and unmounting puts it back — "no input box and no button" must not
+  // be reachable.
+  const seat = {
+    style: { display: "flex" },
+    dataset: {},
+    getBoundingClientRect: function () { return { top: 600, bottom: 700, left: 0, right: 900, width: 900, height: 100 }; }
+  };
+  const layer = { getBoundingClientRect: function () { return { top: 0, bottom: 800, left: 0, right: 1000, width: 1000, height: 800 }; } };
+  const before = {
+    document: globalThis.document,
+    MutationObserver: globalThis.MutationObserver,
+    localStorage: globalThis.localStorage,
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval
+  };
+  const ticks = [];
+  globalThis.document = {
+    body: {},
+    querySelector: function (selector) {
+      if (selector === "[data-composer-seat]") return seat;
+      if (selector === "[data-shell-overlay]") return layer;
+      return null;
+    }
+  };
+  globalThis.MutationObserver = function () { this.observe = function () {}; this.disconnect = function () {}; };
+  globalThis.localStorage = { getItem: function () { return "1"; }, setItem: function () {} };
+  // Never a real timer: an interval left running would keep the test process up.
+  globalThis.setInterval = function (fn) { ticks.push(fn); return ticks.length; };
+  globalThis.clearInterval = function () {};
+
+  try {
+    const loaded = loadClient(CLIENT_SOURCE, {}, { runEffects: true });
+    render(loaded.entries["shell.overlay:ecom-composer-toggle"]({}), 0);
+
+    assert.equal(seat.style.display, "none", "the remembered preference must hide the composer's seat on mount");
+    assert.equal(seat.dataset.ecomComposerCollapsed, "1", "and it must be marked, so the plugin knows it owns that display");
+    assert.equal(seat.dataset.ecomPrevDisplay, "flex", "the previous inline display is remembered, not assumed to be empty");
+
+    // While collapsed it re-asserts (the shell rebuilds the seat on a session
+    // bind); the tick must not throw with the seat present and must leave it
+    // collapsed.
+    assert.equal(ticks.length, 1, "collapsed state is the one that needs upkeep");
+    ticks[0]();
+    assert.equal(seat.style.display, "none", "re-asserting keeps it collapsed");
+
+    // Unmount: the plugin gives the shell its composer back.
+    loaded.effectCleanups.forEach(function (cleanup) { cleanup(); });
+    assert.equal(seat.style.display, "flex", "unmounting must restore the composer, not leave the shell without an input box");
+    assert.equal(seat.dataset.ecomComposerCollapsed, undefined, "and drop its claim on the element");
+  } finally {
+    Object.keys(before).forEach(function (key) {
+      if (before[key] === undefined) delete globalThis[key];
+      else globalThis[key] = before[key];
+    });
+  }
 });
 
 test("the workbench nav and its view list cannot drift apart", () => {

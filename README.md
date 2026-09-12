@@ -704,7 +704,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 ## Verify
 
 - Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowSettings.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js && node --check lib/printPipeline.js`
-- Tests: `node --test "test/*.test.js"` (**96/96 pass**). (The quoted glob is
+- Tests: `node --test "test/*.test.js"` (**97/97 pass**). (The quoted glob is
   required: `node --test test/` is not usable on this Node/Windows combination —
   it tries to load the directory as a module. The three files can also be listed
   explicitly.)
@@ -742,7 +742,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     leaving the queue and re-approval re-queuing it, listing/removing products
     with their bytes, deleting a group while keeping its products, and a stale
     T恤 selection falling back to every photo.
-  - `test/client-render.test.js` (12) builds the real client component tree with
+  - `test/client-render.test.js` (13) builds the real client component tree with
     a minimal React stand-in, covering both levels of 工作流 (the list, and a
     workflow's page split into its three tabs — the settings tab, and the history
     tab with its runs and log, each asserted not to render the other's content),
