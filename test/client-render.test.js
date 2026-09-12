@@ -549,11 +549,12 @@ test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 s
   const text = collectText(tree, []);
 
   const missing = [
-    ["← 返回成品库", "the way back to the shelf"],
-    ["2 个款式 · 3 张成片", "the page summary"],
-    ["1 / 2", "the shot counter, so the arrows mean something"],
+    ["商品A", "the 商品 name"],
+    ["2 个款式 · 3 张成片", "the summary"],
+    ["第 1 / 2 张", "the shot counter, so the arrows mean something"],
     ["‹", "the previous-shot arrow"],
     ["›", "the next-shot arrow"],
+    ["点击图片可全屏放大", "that the cover itself can be enlarged"],
     ["款式", "the 款式 switcher"],
     ["这一张的来源", "what the shot is made of"],
     ["商品信息", "the product block"],
@@ -593,6 +594,31 @@ test("a 商品 opens as an app-style page: cover, arrows, left rail and 款式 s
     imgs.some(function (img) { return img.src.indexOf("a-1.png") !== -1 && img.style.maxHeight === "100%" && img.style.width === "auto"; }),
     true,
     "the cover must be capped by its stage so it always fits"
+  );
+
+  // It must be a MODAL: an overlay over the feed, closable by backdrop or Esc —
+  // not a page that replaces the shelf.
+  let overlay = null;
+  (function walk(node) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.props && node.props.style && node.props.style.position === "fixed") overlay = overlay || node;
+    walk(node.children);
+  })(tree);
+  assert.ok(overlay, "the product view must be a fixed overlay, not an inline page");
+  assert.equal(typeof overlay.props.onClick, "function", "clicking the backdrop must close it");
+  // The close control is an icon, so its affordance lives in the tooltip.
+  const tooltips = [];
+  (function walk(node) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.props && typeof node.props.title === "string") tooltips.push(node.props.title);
+    walk(node.children);
+  })(overlay);
+  assert.equal(
+    tooltips.some(function (t) { return t.indexOf("关闭") !== -1; }),
+    true,
+    "there must be a visible close affordance"
   );
 });
 
@@ -669,8 +695,8 @@ test("tapping a shot in the waterfall opens its 商品 on that shot", () => {
     __DEMO_OPEN__: { groupKey: "商品A", shotId: "p2" }
   });
   const text = collectText(render(loaded.view({}), 0), []);
-  // The counter is its own text node (`款式：1 / 2` on the info line is a
-  // different one), so assert on the node, not on a substring.
-  const counters = text.filter(function (line) { return /^\d+ \/ \d+$/.test(line); });
-  assert.deepEqual(counters, ["2 / 2"], "the page must open on the tapped shot, not on the first one");
+  // The counter is its own text node, so assert on the node, not on a substring
+  // of it (the info block also contains numbers in the same shape).
+  const counters = text.filter(function (line) { return /^第 \d+ \/ \d+ 张$/.test(line); });
+  assert.deepEqual(counters, ["第 2 / 2 张"], "the modal must open on the tapped shot, not on the first one");
 });
