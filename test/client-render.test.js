@@ -496,13 +496,24 @@ test("成品库 is a waterfall of finished shots, each captioned with its 商品
   const missing = [
     ["3 张成片", "how many shots the shelf holds"],
     ["商品A", "the 商品 name on a tile"],
-    ["款式 #1", "which 款式 a tile belongs to"],
-    ["款式 #2", "the other 款式"],
-    ["第 1 轮", "which 换装+裂变 pass a tile came from"]
+    ["#1", "which 款式 a tile belongs to"],
+    ["#2", "the other 款式"]
   ].filter(function (entry) {
     return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
   }).map(function (entry) { return entry[0] + " — " + entry[1]; });
   assert.deepEqual(missing, [], "the waterfall is missing something");
+
+  // The caption is one short line at this tile size, so the full description
+  // lives in the tooltip — and must still be there.
+  const titles = [];
+  (function walk(node) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.props && typeof node.props.title === "string") titles.push(node.props.title);
+    walk(node.children);
+  })(render(loaded.view({}), 0));
+  assert.equal(titles.some(function (t) { return t.indexOf("第 1 轮") !== -1; }), true,
+    "the tile tooltip must still name the 商品, the 款式 and the pass");
 
   // A waterfall, not a grid of covers: every shot is on the shelf.
   const srcs = collectImgSrcsOf(tree);
