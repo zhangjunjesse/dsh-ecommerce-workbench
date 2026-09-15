@@ -871,14 +871,16 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 ## Verify
 
 - Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowSettings.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js && node --check lib/printPipeline.js`
-- Tests: `node --test "test/*.test.js"` (**101/101 pass**). (The quoted glob is
+- Tests: `node --test "test/*.test.js"` (**105/105 pass**). (The quoted glob is
   required: `node --test test/` is not usable on this Node/Windows combination —
   it tries to load the directory as a module. The three files can also be listed
   explicitly.)
   - `test/host-api.test.js` (69) covers the original lifecycle — timing-based
     concurrency proofs, partial-failure proofs (one flaky item still leaves the
     rest of the batch intact, using provider stubs), T恤 create/add-images/
-    delete/clear, T恤二创 single-pair/cross-product/photo-choice/reject-unknown/
+    delete/clear and its 款式 model (白底图/细节图 grouped per colour with 尺码图 on
+    the product, a T恤 and one 款式 renamed without disturbing the other),
+    T恤二创 single-pair/cross-product/photo-choice/reject-unknown/
     delete/clear, 场景图管理's paste-and-store pool (one record per image,
     per-image delete taking its bytes, clear, delete/clear staying inside the
     pool while an unknown `kind` is a no-op, newest-first even when the stored
@@ -896,7 +898,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     workflow's provider calls go through the shared semaphore while
     `withGeneration` is unreachable, and that config + history survive reopening
     the store.
-  - `test/print-pipeline.test.js` (18) drives 印花流水线 through the real handler
+  - `test/print-pipeline.test.js` (20) drives 印花流水线 through the real handler
     with a counting stub provider, so a run's real cost is asserted exactly:
     **一组的 225 次调用** (1 extract + 8 recreate + 24 T恤 + 192 场景, from 4
     prompts × 2, 3 款式, 2 passes × 4), that a second run costs nothing, that a
@@ -909,21 +911,23 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     leaving the queue and re-approval re-queuing it, listing/removing products
     with their bytes, deleting a group while keeping its products, and a stale
     T恤 selection falling back to every photo.
-  - `test/client-render.test.js` (14) builds the real client component tree with
+  - `test/client-render.test.js` (16) builds the real client component tree with
     a minimal React stand-in, covering both levels of 工作流 (the list, and a
     workflow's page split into its three tabs — the settings tab, and the history
     tab with its runs and log, each asserted not to render the other's content),
     the pipeline group panel (group rows, the 225-call estimate and all four
     result stages rendered *inside the row they belong to* — asserted down to the
-    image `src` each stage renders — and the row's T恤 choice, asserted by
+    image `src` each stage renders — and the row's T恤 **and 款式** choice, asserted by
     *counting* the rendered labels so that ignoring the stored `tshirtId` shows up
     as the first T恤 appearing three times instead of once; verified by mutating
-    the lookup and watching it fail), the 成品库 (one card per 款式, the other shots
+    the lookup and watching it fail; and that a pasted image lands in 参考图分组
+    only while 工作流 is the view on screen), the 成品库 (one card per 款式, the other shots
     behind the swipe, every Taobao-card line — title, spec, tags, the T恤 — and
     **no price or 销量**, since the shelf has no such data and must not invent it;
     a square stage that contains rather than crops; then the modal: the fixed
     overlay, the 款式 **rail** asserted to be a column and not a bottom strip, one
-    entry per 款式, the contact sheet, both arrows, the counter, the
+    entry per 款式, the contact sheet, both arrows, the counter, the image strip
+    carrying the 产品展示图 and the T恤's 尺码图 (neither of them a generated shot), the
     source/commerce blocks — again down to each part's images; and that clicking a
     card opens the 商品 *on the shot it was showing*), the
     mount-time hydration (a behavioural test, so a module added
