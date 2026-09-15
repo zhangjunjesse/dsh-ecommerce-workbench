@@ -48,7 +48,8 @@ function makeRes() {
   return {
     statusCode: 0,
     body: null,
-    writeHead(status) { this.statusCode = status; },
+    headers: null,
+    writeHead(status, headers) { this.statusCode = status; this.headers = headers || {}; },
     end(payload) { this.body = payload === undefined ? null : payload; }
   };
 }
@@ -56,19 +57,32 @@ function makeRes() {
 async function call(handler, method, url, body) {
   const res = makeRes();
   await handler(makeReq(method, url, body), res);
-  return { status: res.statusCode, json: typeof res.body === "string" ? JSON.parse(res.body) : res.body };
+  return {
+    status: res.statusCode,
+    headers: res.headers || {},
+    json: typeof res.body === "string" ? JSON.parse(res.body) : res.body
+  };
 }
 
 /** Counts every provider call, so a run's real cost can be asserted exactly. */
 function makeStubProvider() {
   const calls = { extract: 0, recreate: 0, applyToTshirt: 0, generate: 0 };
+  // The full inputs of every 融合 call, so a test can assert what the pipeline
+  // actually handed the model — the extra 细节图 references in particular, which
+  // are invisible in a call count.
+  const tshirtInputs = [];
   return {
     name: "stub",
     calls,
+    tshirtInputs,
     total() { return calls.extract + calls.recreate + calls.applyToTshirt + calls.generate; },
     async extract() { calls.extract++; return { buffer: PNG_BYTES, mimeType: "image/png" }; },
     async recreate() { calls.recreate++; return [{ buffer: PNG_BYTES, mimeType: "image/png" }]; },
-    async applyToTshirt() { calls.applyToTshirt++; return [{ buffer: PNG_BYTES, mimeType: "image/png" }]; },
+    async applyToTshirt(input) {
+      calls.applyToTshirt++;
+      tshirtInputs.push(input || {});
+      return [{ buffer: PNG_BYTES, mimeType: "image/png" }];
+    },
     async generate() { calls.generate++; return [{ buffer: PNG_BYTES, mimeType: "image/png" }]; }
   };
 }
@@ -80,6 +94,40 @@ async function putInboxImage(store, groupKey, fileName) {
   await writeFile(join(directory, fileName), PNG_BYTES);
 }
 
+test("a group's reference image is served from the inbox, and the name cannot climb out", async () => {
+  // A group's screenshots are read straight off disk and never copied into the
+  // store, so `/ecom/api/file/` cannot serve them — the names in `group.images` are
+  // uploaded file names, not store ids. The UI needs them anyway: a group is called
+  // 「组3」 and "3 张参考图" is not an identity.
+  //
+  // Both halves of the query come from the client, so this is also the route where
+  // a traversal would land, and both are asserted here.
+  const { handler, store, groupKey } = await freshPipeline();
+  await putInboxImage(store, groupKey, "shot.png");
+
+  const ok = await call(handler, "GET", "/ecom/api/workflow/group/image?groupKey=" +
+    encodeURIComponent(groupKey) + "&name=" + encodeURIComponent("shot.png"));
+  assert.equal(ok.status, 200, "the group's own image must be served");
+  assert.equal(ok.headers["content-type"], "image/png", "and typed, or the browser will not draw it");
+  assert.equal(ok.json.length, PNG_BYTES.length, "with the actual bytes");
+
+  const missing = await call(handler, "GET", "/ecom/api/workflow/group/image?groupKey=" +
+    encodeURIComponent(groupKey) + "&name=nope.png");
+  assert.equal(missing.status, 404);
+
+  // The file name cannot climb out of the group folder...
+  for (const bad of ["../state.json", "..\\state.json", "sub/shot.png", ""]) {
+    const res = await call(handler, "GET", "/ecom/api/workflow/group/image?groupKey=" +
+      encodeURIComponent(groupKey) + "&name=" + encodeURIComponent(bad));
+    assert.equal(res.status, 400, "a file name of " + JSON.stringify(bad) + " must be refused, not resolved");
+  }
+
+  // ...and the key cannot climb out of the inbox root.
+  const badKey = await call(handler, "GET", "/ecom/api/workflow/group/image?groupKey=" +
+    encodeURIComponent("../..") + "&name=shot.png");
+  assert.equal(badKey.status, 400, "a group key that escapes the inbox must be refused");
+});
+
 /**
  * A store seeded with everything the pipeline needs: the four prompts, one T恤
  * with three photos (三款式), a scene pool, and one group of two screenshots.
@@ -90,7 +138,7 @@ async function freshPipeline(options) {
   const store = createStore(root);
 
   const promptRows = [
-    { name: "印花提取", text: "提取T恤上的印花；" },
+    { name: "印花提取", text: "提取这件衣服上的印花；" },
     { name: "印花二创-1", text: "重新设计印花 1" },
     { name: "印花二创-2", text: "重新设计印花 2" },
     { name: "印花二创-3", text: "重新设计印花 3" },
@@ -113,9 +161,12 @@ async function freshPipeline(options) {
   await store.update(function (state) {
     state.prompts = settings.prompts === undefined ? promptRows : settings.prompts;
     if (settings.tshirt !== false) {
-      state.tshirts = [{
-        id: "t1", name: "测试T恤", images: tshirtPhotos, createdAt: 1
-      }];
+      // `tshirtRecord` seeds a record that already has 款式, for the tests about
+      // colour selection; the default stays the flat photo list, which is also how
+      // a T恤 created before 款式 existed reaches the pipeline.
+      state.tshirts = [settings.tshirtRecord === undefined
+        ? { id: "t1", name: "测试T恤", images: tshirtPhotos, createdAt: 1 }
+        : settings.tshirtRecord];
     }
     state.scenes = sceneFiles.map(function (file, index) {
       return { id: "s" + index, file: file, name: "scene", width: 1, height: 1, createdAt: index };
@@ -427,6 +478,68 @@ test("a group whose T恤 selection is stale still runs against the photos that e
   assert.equal((await store.read()).tshirtRecreations.length, 24);
 });
 
+test("picking one 款式 runs only that colour, and hands its 细节图 to the 融合 step", async () => {
+  // The point of grouping a T恤 by 款式: choosing 白色 must mean 白色's 白底图 —
+  // front and back are two products — carrying 白色's 细节图, and must not drag
+  // 黑色 along. Both halves are asserted here because either one alone is the
+  // silent failure: a run that quietly used every colour, or one that used the
+  // right colour but sent the wrong references.
+  const { handler, store, provider, groupKey } = await freshPipeline({
+    tshirtRecord: {
+      id: "t1", name: "测试T恤", createdAt: 1,
+      colorways: [
+        { id: "cw-white", name: "白色", white: [], detail: [] },
+        { id: "cw-black", name: "黑色", white: [], detail: [] }
+      ],
+      sizeImages: []
+    }
+  });
+
+  // The 白底图 and 细节图 have to be real stored bytes for the pipeline to read
+  // them, so the fixture's photos are dealt out to the two colours afterwards.
+  const photos = [];
+  for (let i = 0; i < 3; i++) photos.push(await store.putFile(PNG_BYTES, "image/png"));
+  const detail = await store.putFile(PNG_BYTES, "image/png");
+  const size = await store.putFile(PNG_BYTES, "image/png");
+  await store.update(function (state) {
+    state.tshirts = [{
+      id: "t1", name: "测试T恤", createdAt: 1,
+      colorways: [
+        // 白色 is shot front and back, and has a collar close-up; 黑色 has one shot.
+        { id: "cw-white", name: "白色", white: [photos[0], photos[1]], detail: [detail] },
+        { id: "cw-black", name: "黑色", white: [photos[2]], detail: [] }
+      ],
+      sizeImages: [size]
+    }];
+  });
+
+  await call(handler, "POST", "/ecom/api/workflow/group/approve", {
+    groupKey: groupKey, approved: true, tshirtId: "t1", tshirtColorways: ["cw-white"]
+  });
+  const estimate = await call(handler, "GET", "/ecom/api/workflow/estimate?groupKey=" + encodeURIComponent(groupKey));
+  assert.equal(estimate.json.plan.tshirt.selected.length, 2,
+    "one 款式 picked = its two 白底图, not one photo and not all three");
+  assert.deepEqual(estimate.json.plan.tshirt.colorways.map(function (c) { return c.name; }), ["白色"]);
+  assert.deepEqual(estimate.json.plan.tshirt.sizeImages, [size],
+    "the 尺码图 travel with the product, not with the colour");
+
+  const run = await runPipeline(handler, { groupKey: groupKey });
+  assert.equal(run.status, "success", run.error || "");
+  // 8 二创印花 × 1 款式 = 8 融合 calls. The step fans out over the 款式, not over its
+  // photos: the model is handed the whole colour and picks which shot to draw on,
+  // because nothing in the data says which of a 款式's 白底图 is the front.
+  assert.equal(provider.calls.applyToTshirt, 8);
+  assert.equal(provider.tshirtInputs.every(function (input) {
+    // 白色's two 白底图 and its 细节图, in that order — and no 尺码图, which is a
+    // diagram rather than evidence about the fabric.
+    return Array.isArray(input.refs) && input.refs.length === 3;
+  }), true, "every 融合 call must carry the whole 款式: 白底图 then 细节图");
+  // And the colour is recorded on the product, so the shelf can group a colour's
+  // shots without re-deriving it from a T恤 record that may have changed since.
+  const rows = (await store.read()).tshirtRecreations;
+  assert.equal(rows.every(function (r) { return r.colorwayName === "白色"; }), true);
+});
+
 // ---------------------------------------------------------------------------
 // 工作流参数 — the two knobs that decide the shape (and the cost) of step 4.
 // ---------------------------------------------------------------------------
@@ -487,4 +600,58 @@ test("settings persist, survive a restart, and reach the client through /state",
   const again = (await call(reopened, "GET", "/ecom/api/state")).json.workflows[0];
   assert.equal(again.settings.sceneCount, 6);
   assert.deepEqual(again.settingFields.map(function (f) { return f.key; }), ["sceneCount", "sceneOutputs"]);
+});
+
+test("one run deals its scenes from one deck, so the pool is spread rather than reused", async () => {
+  // The bug this guards, and why it takes a run rather than a unit: the pool used to
+  // be copied **per 款式**, so "without replacement" held only inside one 款式 and
+  // two 款式 could draw the same background. Over a run that produced a handful of
+  // scenes reused over and over while most of the pool went untouched — measured on
+  // this machine, one scene 14 times, another 13, and only 2 of 228 used exactly
+  // once. From the outside that reads as 随机选场景图并不是很随机.
+  //
+  // Sized so the two behaviours cannot be confused, and so the whole run stays under
+  // the 400-call ceiling: 5 款式 × 8 印花 = 40 融合, × 4 scenes × 2 shots = 320 成片,
+  // total 369. The 20 scene draws come from a pool of exactly 20 — dealing from one
+  // deck uses every scene exactly once, while five independent draws of 4 from 20
+  // cover about 14.
+  const { handler, store, groupKey, tshirtPhotos } = await freshPipeline({ scenes: 20, tshirtPhotos: 5 });
+  await store.update(function (state) {
+    state.tshirts = [{
+      id: "t1", name: "测试T恤", createdAt: 1, sizeImages: [],
+      colorways: tshirtPhotos.map(function (file, index) {
+        return { id: "cw" + index, name: "款式 " + (index + 1), white: [file], detail: [], model: [] };
+      })
+    }];
+  });
+
+  const run = await runPipeline(handler, { groupKey: groupKey });
+  assert.equal(run.status, "success", run.error || "");
+
+  const forGroup = async function () {
+    return (await store.readOutputs()).outputs.filter(function (o) { return o.groupKey === groupKey; });
+  };
+  const outputs = await forGroup();
+  assert.equal(outputs.length, 320, "5 款式 × 8 印花 × 4 scenes × 2 shots");
+
+  // **Evenness**, not coverage, is the property that discriminates. 40 composites
+  // each deal `sceneCount` scenes from one shared deck, and the deck holds exactly the
+  // 20-scene pool, so the deals divide evenly and every scene ends up with the same
+  // number of shots — 320 / 20 = 16. The old per-款式 copy of the pool gives some
+  // scenes a dozen and others two. Coverage alone would not have caught it: 160 draws
+  // cover 20 scenes even when every draw is independent, which is why the first
+  // version of this test passed against a deliberately broken selector.
+  const loads = new Map();
+  outputs.forEach(function (o) { loads.set(o.sceneId, (loads.get(o.sceneId) || 0) + 1); });
+  const counts = Array.from(loads.values());
+  assert.equal(loads.size, 20, "every scene in the pool must be used");
+  assert.equal(Math.max.apply(null, counts), 16,
+    "one deck over a 20-scene pool is 320/20 = 16 shots each; a heavier maximum means the pool was copied per 款式");
+  assert.equal(Math.min.apply(null, counts), 16, "and no scene may be left behind");
+
+  // And a second run has nothing left to make — which scenes were used is recorded in
+  // the products themselves, so a resumed run continues rather than re-deals.
+  const again = await runPipeline(handler, { groupKey: groupKey });
+  assert.equal(again.status, "success", again.error || "");
+  assert.equal((await forGroup()).length, 320);
 });

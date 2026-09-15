@@ -508,7 +508,17 @@ test("the pipeline panel renders its groups, estimate and four result stages", (
       tshirt: { name: "印花T恤融合", found: true },
       scene: { name: "换装+裂变", found: true }
     },
-    tshirt: { id: "t1", name: "测试T恤", photos: ["p1", "p2", "p3"], selected: ["p1", "p2", "p3"] },
+    // Three 款式, one shot each — the shape the estimate has to describe. `selected`
+    // is the flattened 白底图 list, which is NOT the 款式 count.
+    tshirt: {
+      id: "t1", name: "测试T恤", photos: ["p1", "p2", "p3"], selected: ["p1", "p2", "p3"],
+      colorways: [
+        { id: "cw1", name: "白色", white: ["p1"], detail: [], model: [] },
+        { id: "cw2", name: "杏色", white: ["p2"], detail: [], model: [] },
+        { id: "cw3", name: "黑色", white: ["p3"], detail: [], model: [] }
+      ],
+      sizeImages: []
+    },
     scenes: { available: 228 },
     plan: { extract: 1, recreate: 8, tshirt: 24, scene: 192, total: 225 },
     pending: { extract: 1, recreate: 8, tshirt: 24, scene: 192, total: 225, printsAvailable: 0 },
@@ -578,6 +588,10 @@ test("the pipeline panel renders its groups, estimate and four result stages", (
     ["估算并运行", "the estimate entry point"],
     ["已排队", "a group handed to the scheduler"],
     ["合计 225 次生成调用", "the cost, before it is spent"],
+    // 融合 is one call per 款式 (a colour), so the label has to name the 款式 count —
+    // showing the 白底图 count as 款式 reads as "6 款式" for a 3-colour T恤 shot
+    // twice each, which is what it was doing.
+    ["T恤融合 24（3 个款式 · 3 张白底图）", "the 款式 count, not the photo count"],
     ["本次还需 225 次", "what this run would actually do"],
     ["上限 400 次", "the ceiling it will be checked against"],
     ["已经不在这件T恤里", "the stale-selection warning"],
@@ -625,6 +639,214 @@ test("the pipeline panel renders its groups, estimate and four result stages", (
     assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
       "stage result " + file + " is not rendered (got " + srcs.length + " images)");
   });
+});
+
+/**
+ * The product page's own subtree (the overlay ProductModal renders).
+ *
+ * Scoping is not optional: `collectText` walks the whole tree, and **every** workbench
+ * view stays mounted — inactive ones hidden with `display:none`, not unmounted — so
+ * 尺码图 and its images also appear in T恤管理. An unscoped assertion therefore passes
+ * whatever the modal does, which is exactly what the first version of this test did.
+ */
+function findModal(tree) {
+  let found = null;
+  (function walk(node) {
+    if (found !== null || node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    const style = node.props && node.props.style;
+    if (style && style.position === "fixed" && style.zIndex === 900) { found = node; return; }
+    walk(node.children);
+  })(tree);
+  return found;
+}
+
+test("the product page's image strip carries the 白底图 and the T恤's 尺码图, neither generated", () => {
+  // Both already exist and were simply not reachable: the 白底图 is the 融合 output
+  // (the composite the whole card is named after) and the 尺码图 is an upload on the
+  // T恤. Showing the 尺码图 is the whole of what it needs — a size table is a diagram
+  // with numbers on it, and a model asked to draw one invents the numbers.
+  //
+  // The modal only mounts once a 商品 is open, which a single render pass cannot
+  // reach by clicking, so the open state is seeded — exactly the shortcut the shelf
+  // test uses for its loading state.
+  const patched = CLIENT_SOURCE
+    .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
+    .replace("var tshirtsState = React.useState([]);", "var tshirtsState = React.useState(__DEMO_SHELF_TSHIRTS__);")
+    .replace("var tshirtRecreationsState = React.useState([]);", "var tshirtRecreationsState = React.useState(__DEMO_SHELF_RECREATIONS__);")
+    .replace("var loadingState = React.useState(true);", "var loadingState = React.useState(false);")
+    // p3 is the shot whose composite (t2.png) resolves through 二创T恤 to 白色 of the
+    // T恤 — the only path that reaches a 尺码图.
+    .replace("var openState = React.useState(null);", "var openState = React.useState(__DEMO_OPEN__);");
+  assert.match(patched, /useState\(__DEMO_OPEN__\)/, "the open-商品 seed no longer applies — update it");
+
+  const loaded = loadClient(patched, {
+    __DEMO_PRODUCTS__: DEMO_PRODUCTS,
+    __DEMO_SHELF_TSHIRTS__: DEMO_SHELF_TSHIRTS,
+    __DEMO_SHELF_RECREATIONS__: DEMO_SHELF_RECREATIONS,
+    __DEMO_OPEN__: { groupKey: "商品A", shotId: "p3" }
+  });
+  const tree = render(loaded.view({}), 0);
+  const modal = findModal(tree);
+  assert.notEqual(modal, null, "the seeded 商品 must actually open the product page");
+
+  // The strip is 产品展示图 + 成片 + 尺码图, so all three are reachable from the one
+  // list the big viewer, the arrows and the counter all walk.
+  const srcs = collectImgSrcsOf(modal);
+  assert.equal(srcs.some(function (src) { return src.indexOf("t2.png") !== -1; }), true,
+    "the 产品展示图 is the 融合 output — the composite this 款式 is named after, got " + JSON.stringify(srcs));
+  assert.equal(srcs.some(function (src) { return src.indexOf("size.png") !== -1; }), true,
+    "the 尺码图 comes from the T恤 record, got " + JSON.stringify(srcs));
+  assert.equal(srcs.some(function (src) { return src.indexOf("b-1.png") !== -1; }), true,
+    "and the 款式's own 成片 is still in there with them");
+
+  // Labelled, so the two non-shot entries are not mistaken for more 成片. The labels
+  // live on the buttons' titles (a strip 54px wide has no room for text).
+  const flat = JSON.stringify(modal);
+  assert.equal(flat.indexOf("产品展示图") !== -1, true, "the 白底图 must be labelled");
+  assert.equal(flat.indexOf("尺码图") !== -1, true, "and so must the 尺码图");
+});
+
+test("参考图分组 takes pasted images, and only while 工作流 is the view on screen", () => {
+  // The composer accepts a paste the way the other composers do, so a screenshot
+  // does not have to be saved to disk first. Two things have to hold, and a
+  // render-only check sees neither: the listener must be registered, and it must
+  // NOT be registered while another view is showing. Every view stays mounted —
+  // inactive ones are hidden with `display:none`, not unmounted — so an ungated
+  // listener silently takes an image pasted into 印花提取, and the symptom is an
+  // image in the wrong place rather than any error at all.
+  const now = Date.now();
+  const pipelineWorkflow = {
+    id: "print.pipeline", name: "印花流水线", description: "一组参考图 → 四步",
+    enabled: true, schedule: null, nextRunAt: null,
+    lastRunAt: now - 1000, lastRunId: "run-1", lastStatus: "success", running: false, runId: null
+  };
+  const before = { document: globalThis.document };
+  const listeners = [];
+  globalThis.document = {
+    activeElement: null,
+    // The workbench injects its layout stylesheet on render, so the stub needs
+    // enough of a DOM for that one call. Only the paste registration is asserted.
+    head: { appendChild: function () {} },
+    createElement: function () { return { style: {}, dataset: {}, textContent: "", appendChild: function () {} }; },
+    addEventListener: function (type, fn) { if (type === "paste") listeners.push(fn); },
+    removeEventListener: function () {}
+  };
+
+  function pasteListenersOn(view) {
+    listeners.length = 0;
+    const patched = CLIENT_SOURCE
+      .replace("var workflowsState = React.useState([]);", "var workflowsState = React.useState(__DEMO_WORKFLOWS__);")
+      .replace("var viewState = React.useState(\"印花提取\");", "var viewState = React.useState(__DEMO_VIEW__);")
+      // Open the pipeline's page, where the group composer lives.
+      .replace(
+        /var detailState = React\.useState\(null\);\s*\n\s*var detailId = detailState\[0\];/,
+        "var detailState = React.useState(__DEMO_WORKFLOWS__[0].id);\n        var detailId = detailState[0];"
+      );
+    assert.notEqual(patched, CLIENT_SOURCE, "the in-memory seed no longer applies — update it");
+    const loaded = loadClient(patched, { __DEMO_WORKFLOWS__: [pipelineWorkflow], __DEMO_VIEW__: view }, { runEffects: true });
+    render(loaded.view({}), 0);
+    return listeners.length;
+  }
+
+  try {
+    assert.equal(pasteListenersOn("工作流") > 0, true,
+      "the group composer must listen for a paste while 工作流 is on screen");
+    assert.equal(pasteListenersOn("印花提取"), 0,
+      "and must not while another view is — a hidden view still runs its effects");
+  } finally {
+    globalThis.document = before.document;
+  }
+});
+
+test("a pipeline group row shows the 款式 it is set to run, not just the first T恤", () => {
+  // The host has always stored a per-group T恤 choice, but the UI never let anyone
+  // set one and never showed which was in force, so every run silently used the
+  // first T恤. The picker now selects a **款式** (a colour), which is what brings
+  // that colour's 白底图 and its 细节图 along.
+  //
+  // Rendering the stored choice is the entire point, and it is exactly what
+  // "renders without throwing" would miss: getting it wrong still produces a
+  // perfectly valid row, just one that names the wrong colour.
+  const now = Date.now();
+  const pipelineWorkflow = {
+    id: "print.pipeline", name: "印花流水线", description: "一组参考图 → 四步",
+    enabled: true, schedule: null, nextRunAt: null,
+    lastRunAt: now - 1000, lastRunId: "run-1", lastStatus: "success", running: false, runId: null
+  };
+  const tshirts = [
+    // A record from before 款式 existed: read as one 款式 per photo.
+    { id: "ta", name: "基础白T", images: ["a1.png", "a2.png", "a3.png"] },
+    {
+      id: "tb", name: "重磅黑T",
+      colorways: [
+        { id: "cw-white", name: "白色", white: ["b1.png", "b2.png"], detail: ["b-d1.png"] },
+        { id: "cw-black", name: "黑色", white: ["b3.png"], detail: [] }
+      ],
+      sizeImages: ["b-size.png"],
+      images: ["b1.png", "b2.png", "b3.png"]
+    }
+  ];
+  const group = function (key, tshirtId, tshirtImages, tshirtColorways) {
+    return {
+      key: key, name: key, source: "inbox", images: ["x.png"], imageCount: 1,
+      status: "pending", approvedAt: null, tshirtId: tshirtId, tshirtImages: tshirtImages,
+      tshirtColorways: tshirtColorways,
+      counts: null, failures: 0, lastRunAt: null, lastRunId: null, updatedAt: null
+    };
+  };
+  const demo = {
+    __DEMO_WORKFLOWS__: [pipelineWorkflow],
+    __DEMO_TSHIRTS__: tshirts,
+    // A: a T恤, nothing narrowed. B: nothing stored at all. C: one 款式 picked.
+    // D: the pre-款式 per-photo form, which must read as the 款式 owning that photo.
+    __DEMO_GROUPS__: [
+      group("商品A", "tb", null, null),
+      group("商品B", null, null, null),
+      group("商品C", "tb", null, ["cw-black"]),
+      group("商品D", "tb", ["b2.png"], null)
+    ]
+  };
+
+  const patched = CLIENT_SOURCE
+    .replace("var workflowsState = React.useState([]);", "var workflowsState = React.useState(__DEMO_WORKFLOWS__);")
+    .replace("var tshirtsState = React.useState([]);", "var tshirtsState = React.useState(__DEMO_TSHIRTS__);")
+    // Open the pipeline's page, which is where its group rows live.
+    .replace(
+      /var detailState = React\.useState\(null\);\s*\n\s*var detailId = detailState\[0\];/,
+      "var detailState = React.useState(__DEMO_WORKFLOWS__[0].id);\n        var detailId = detailState[0];"
+    )
+    .replace("var groupsState = React.useState([]);", "var groupsState = React.useState(__DEMO_GROUPS__);");
+  assert.notEqual(patched, CLIENT_SOURCE, "the in-memory seed no longer applies — update it");
+  assert.match(patched, /useState\(__DEMO_TSHIRTS__\)/);
+
+  const view = loadClient(patched, demo).view;
+  const text = collectText(render(view({}), 0), []);
+  const count = function (needle) {
+    return text.filter(function (line) { return line.indexOf(needle) !== -1; }).length;
+  };
+
+  // No picker was opened, so every row is showing a *resolved* choice. If the
+  // list never reached the panel every row would say so instead.
+  assert.equal(count("还没有 T恤"), 0,
+    "the T恤 list did not reach the group rows — every row degrades to the empty picker");
+
+  // The exact set is the assertion that matters, and it is deliberately a
+  // multiset: five labels for four groups, because 创建分组 carries the same
+  // picker — that is the moment the group is being set up, so the choice belongs
+  // there and not only on a row that does not exist yet.
+  //
+  // Every one of these would collapse to 基础白T · 全部 3 个款式 ▾ if the stored
+  // choice were ignored, and 商品D's line is the one that proves the pre-款式
+  // per-photo selection still reads as the 款式 owning that photo.
+  const labels = text.filter(function (l) { return /^(基础白T|重磅黑T) · /.test(l); }).sort();
+  assert.deepEqual(labels, [
+    "基础白T · 全部 3 个款式 ▾", // 创建分组's own picker, nothing picked yet
+    "基础白T · 全部 3 个款式 ▾", // 商品B — nothing stored, so the host's default
+    "重磅黑T · 全部 2 个款式 ▾", // 商品A — stored a T恤, no 款式 narrowed
+    "重磅黑T · 黑色 ▾", //        商品C — one 款式 picked, named
+    "重磅黑T · 白色 ▾" //         商品D — a photo from before 款式, read as its 款式
+  ].sort());
 });
 
 test("the mount-time state load hydrates every module, 工作流 included", async () => {
@@ -680,7 +902,25 @@ test("the mount-time state load hydrates every module, 工作流 included", asyn
 const DEMO_PRODUCTS = [
   { id: "p1", groupKey: "商品A", groupName: "商品A", file: "a-1.png", tshirtFile: "t1.png", sceneFile: "s1.png", tshirtName: "180G女士纯棉T恤", width: 600, height: 800, sceneIndex: 0, createdAt: 3 },
   { id: "p2", groupKey: "商品A", groupName: "商品A", file: "a-2.png", tshirtFile: "t1.png", sceneFile: "s2.png", tshirtName: "180G女士纯棉T恤", width: 600, height: 800, sceneIndex: 1, createdAt: 2 },
-  { id: "p3", groupKey: "商品A", groupName: "商品A", file: "b-1.png", tshirtFile: "t2.png", sceneFile: "s3.png", tshirtName: "180G女士纯棉T恤", sceneIndex: 0, createdAt: 1 }
+  // No `tshirtName` on purpose: this is what the second pipeline run wrote, and
+  // what every record written before those fields existed looks like. The card has
+  // to recover the garment anyway.
+  { id: "p3", groupKey: "商品A", groupName: "商品A", file: "b-1.png", tshirtFile: "t2.png", sceneFile: "s3.png", sceneIndex: 0, createdAt: 1 }
+];
+
+/**
+ * The 二创T恤 row and T恤 the shelf resolves `t2.png` through.
+ *
+ * `t2.png` is the composite; its row names the T恤 photo it was composited onto
+ * (`wb.png`), and that photo belongs to 白色 of the T恤. Nothing here is copied
+ * onto the shot record — the whole point is that the shelf works it out, so a
+ * rename shows up without a backfill.
+ */
+const DEMO_SHELF_RECREATIONS = [
+  { id: "r1", tshirtFile: "wb.png", tshirtName: "180G女士纯棉T恤", prints: [{ id: "c1", file: "t2.png" }] }
+];
+const DEMO_SHELF_TSHIRTS = [
+  { id: "ta", name: "180G女士纯棉T恤", colorways: [{ id: "cw-white", name: "白色", white: ["wb.png"], detail: [], model: [] }], sizeImages: ["size.png"] }
 ];
 
 /** Every `src` in the rendered tree — images carry file names, text does not. */
@@ -698,12 +938,18 @@ function collectImgSrcsOf(node) {
 test("成品库 is a feed of 款式 — one card each, shaped like a listing", () => {
   const patched = CLIENT_SOURCE
     .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
+    .replace("var tshirtsState = React.useState([]);", "var tshirtsState = React.useState(__DEMO_SHELF_TSHIRTS__);")
+    .replace("var tshirtRecreationsState = React.useState([]);", "var tshirtRecreationsState = React.useState(__DEMO_SHELF_RECREATIONS__);")
     // The shelf shows a loading state until the fetch lands; with a single render
     // pass it would never get past it, so the loaded state is seeded too.
     .replace("var loadingState = React.useState(true);", "var loadingState = React.useState(false);");
   assert.match(patched, /useState\(__DEMO_PRODUCTS__\)/, "the product seed no longer applies — update it");
 
-  const loaded = loadClient(patched, { __DEMO_PRODUCTS__: DEMO_PRODUCTS });
+  const loaded = loadClient(patched, {
+    __DEMO_PRODUCTS__: DEMO_PRODUCTS,
+    __DEMO_SHELF_TSHIRTS__: DEMO_SHELF_TSHIRTS,
+    __DEMO_SHELF_RECREATIONS__: DEMO_SHELF_RECREATIONS
+  });
   const tree = render(loaded.view({}), 0);
   const text = collectText(tree, []);
 
@@ -719,7 +965,11 @@ test("成品库 is a feed of 款式 — one card each, shaped like a listing", (
     ["2 个场景", "the first tag: how many scenes it was shot in"],
     ["每场景 1 张", "the second tag: how many shots per scene"],
     ["3:4", "the measured ratio, as a tag"],
-    ["180G女士纯棉T恤", "the T恤 line, standing in for the shop"]
+    ["180G女士纯棉T恤", "the T恤 line, standing in for the shop"],
+    // …and the colour, recovered for the shot that carries no name at all. This is
+    // the line that says *which* garment a card is: six products of one T恤 are six
+    // identical lines without it.
+    ["180G女士纯棉T恤 · 白色", "the 款式, resolved from the T恤 records rather than the shot"]
   ].filter(function (entry) {
     return !text.some(function (line) { return line.indexOf(entry[0]) !== -1; });
   }).map(function (entry) { return entry[0] + " — " + entry[1]; });
@@ -730,14 +980,31 @@ test("成品库 is a feed of 款式 — one card each, shaped like a listing", (
   assert.equal(/[¥￥]\s*\d/.test(text.join("|")), false, "the shelf must not show a price it does not have");
   assert.equal(/人付款|销量|已售/.test(text.join("|")), false, "nor sales figures");
 
-  // ONE image per 款式. Three shots exist across two 款式, so the feed must show
-  // two tiles — the other shots of a 款式 live behind a swipe on its own card,
-  // not as tiles of their own, or the shelf is 192 near-identical images again.
-  const srcs = collectImgSrcsOf(tree).filter(function (src) { return /a-1\.png|a-2\.png|b-1\.png/.test(src); });
-  assert.equal(srcs.length, 2, "the feed must show one image per 款式, got " + JSON.stringify(srcs));
-  assert.equal(srcs.some(function (src) { return src.indexOf("a-1.png") !== -1; }), true, "the newest shot of 款式 #1 is its cover");
-  assert.equal(srcs.some(function (src) { return src.indexOf("a-2.png") !== -1; }), false, "the other shot of 款式 #1 must be behind a swipe");
-  assert.equal(srcs.some(function (src) { return src.indexOf("b-1.png") !== -1; }), true, "款式 #2 is its own card");
+  // Scoped to the cards themselves (`.ecom-card`): `collectImgSrcsOf` walks the whole
+  // tree, and the pipeline's stage results render the same composite files, so an
+  // unscoped count picks up images that are not covers at all.
+  const cardImgs = [];
+  (function walk(node) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.props && node.props.className === "ecom-card") {
+      collectImgSrcsOf(node).forEach(function (src) { cardImgs.push(src); });
+      return;
+    }
+    walk(node.children);
+  })(tree);
+
+  // ONE tile per 款式, and the tile is its **白底图** — the 融合 output — not a 成片.
+  // The shots of one 款式 are one garment in several scenes, so covering a card with a
+  // 成片 makes a grid read as many products instead of one, and the backgrounds make it
+  // noisy; against white the only thing that varies is the print.
+  assert.equal(cardImgs.length, 2, "one cover per 款式, got " + JSON.stringify(cardImgs));
+  const covers = cardImgs.filter(function (src) { return /t1\.png|t2\.png/.test(src); });
+  assert.equal(covers.length, 2, "and each cover is the 款式's 白底图, got " + JSON.stringify(cardImgs));
+  // The 成片 live behind a swipe on the card, not as tiles of their own, or the shelf is
+  // 192 near-identical images again.
+  assert.deepEqual(cardImgs.filter(function (src) { return /a-1\.png|a-2\.png|b-1\.png/.test(src); }), [],
+    "no 成片 may be on the feed itself, got " + JSON.stringify(cardImgs));
 
   // The tile is a fixed SQUARE with the shot contained, which is Taobao's shape
   // *without* Taobao's crop: these are 3:4 shots and cropping one to a square
@@ -745,13 +1012,18 @@ test("成品库 is a feed of 款式 — one card each, shaped like a listing", (
   // the old measured-ratio box was working around.
   const stages = [];
   const feedImgs = [];
-  (function walk(node) {
+  (function walk(node, inStage) {
     if (node === null || node === undefined || typeof node !== "object") return;
-    if (Array.isArray(node)) { node.forEach(walk); return; }
-    if (node.props && node.props.style && node.props.style.aspectRatio === "1 / 1") stages.push(node);
-    if (node.type === "img" && node.props) feedImgs.push({ src: String(node.props.src), style: node.props.style || {} });
-    walk(node.children);
-  })(tree);
+    if (Array.isArray(node)) { node.forEach(function (child) { walk(child, inStage); }); return; }
+    // Scoped to the shelf's own stages. Other modules crop their thumbnails on
+    // purpose — T恤管理's 52px tiles are `objectFit: cover` — and the claim being
+    // checked is about the shelf, not about every image the page happens to hold.
+    const isStage = !!(node.props && node.props.style && node.props.style.aspectRatio === "1 / 1");
+    if (isStage) stages.push(node);
+    const inside = inStage || isStage;
+    if (node.type === "img" && node.props && inside) feedImgs.push({ src: String(node.props.src), style: node.props.style || {} });
+    walk(node.children, inside);
+  })(tree, false);
   assert.equal(stages.length, 2, "every card needs its own square stage, got " + stages.length);
   assert.equal(
     feedImgs.some(function (img) { return img.style.objectFit === "cover"; }),
@@ -759,13 +1031,13 @@ test("成品库 is a feed of 款式 — one card each, shaped like a listing", (
     "nothing on the shelf may be cropped to fit"
   );
   assert.equal(
-    feedImgs.some(function (img) { return img.src.indexOf("a-1.png") !== -1 && img.style.maxWidth === "100%" && img.style.maxHeight === "100%"; }),
+    feedImgs.some(function (img) { return img.src.indexOf("t1.png") !== -1 && img.style.maxWidth === "100%" && img.style.maxHeight === "100%"; }),
     true,
-    "the shot must be bounded by its stage so it is letterboxed, never stretched"
+    "the cover must be bounded by its stage so it is letterboxed, never stretched"
   );
 });
 
-test("a 商品 opens as a modal: 款式 rail, cover, arrows, contact sheet — no bottom strip", () => {
+test("a 商品 opens as a modal: 款式 rail, cover, arrows, image strip — and the rail stays vertical", () => {
   const patched = CLIENT_SOURCE
     .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
     // Seeded too: with `loading` still true the feed never renders, and the modal
@@ -774,19 +1046,22 @@ test("a 商品 opens as a modal: 款式 rail, cover, arrows, contact sheet — n
     .replace("var openState = React.useState(null);", "var openState = React.useState(__DEMO_OPEN__);");
   assert.match(patched, /useState\(__DEMO_OPEN__\)/, "the open-商品 seed no longer applies — update it");
 
-  const loaded = loadClient(patched, { __DEMO_PRODUCTS__: DEMO_PRODUCTS, __DEMO_OPEN__: { groupKey: "商品A", shotId: null } });
+  // Opened the way a card click opens it — naming the shot the feed was showing.
+  const loaded = loadClient(patched, { __DEMO_PRODUCTS__: DEMO_PRODUCTS, __DEMO_OPEN__: { groupKey: "商品A", shotId: "p1" } });
   const tree = render(loaded.view({}), 0);
   const text = collectText(tree, []);
 
   const missing = [
     ["商品A", "the 商品 name"],
     ["2 个款式 · 3 张成片", "the summary"],
-    ["第 1 / 2 张", "the shot counter, so the arrows mean something"],
-    ["‹", "the previous-shot arrow"],
-    ["›", "the next-shot arrow"],
+    // The strip is 产品展示图 + the 款式's two 成片. The card named p1, which is the first
+    // 成片 and therefore 2 of 3 — the 产品展示图 leads the strip but is not what the feed
+    // was showing, so the modal must not silently jump to it.
+    ["第 2 / 3 张", "the image counter, so the arrows mean something"],
+    ["‹", "the previous-image arrow"],
+    ["›", "the next-image arrow"],
     ["点击图片可全屏放大", "that the cover itself can be enlarged"],
     ["这一张的来源", "what the shot is made of"],
-    ["这个款式的图集", "the contact sheet, now that the rail holds 款式"],
     ["商品信息", "the product block"],
     ["删除这张", "removing a shot"]
   ].filter(function (entry) {
@@ -795,20 +1070,22 @@ test("a 商品 opens as a modal: 款式 rail, cover, arrows, contact sheet — n
   assert.deepEqual(missing, [], "the product modal is missing something");
 
   // Every part of the modal must actually render its images: the cover, the two
-  // references, and the contact sheet. t2.png (the OTHER 款式's composite) now
-  // belongs in the 款式 rail — that is the whole point of the rail — but it must
-  // never be the cover.
+  // references, and the strip. The feed's cards now cover with the 白底图, so t1.png
+  // and t2.png appear as covers as well as in the 款式 rail.
   const srcs = collectImgSrcsOf(tree);
-  ["a-1.png", "a-2.png", "b-1.png", "t1.png", "s1.png"].forEach(function (file) {
+  ["a-1.png", "a-2.png", "t1.png", "s1.png"].forEach(function (file) {
     assert.equal(srcs.some(function (src) { return src.indexOf(file) !== -1; }), true,
       file + " is not rendered (got " + JSON.stringify(srcs) + ")");
   });
-  assert.equal(srcs.filter(function (src) { return src.indexOf("t2.png") !== -1; }).length, 1,
-    "the other 款式 must appear exactly once — in the rail, not as content");
+  // t2.png is the OTHER 款式: it must never be the open 款式's content — only its rail
+  // entry and its own feed cover.
+  assert.equal(srcs.filter(function (src) { return src.indexOf("t2.png") !== -1; }).length, 2,
+    "the other 款式's composite belongs in the rail and on its own card, nowhere else (got " + JSON.stringify(srcs) + ")");
 
-  // The rail is a rail, not the bottom strip the user had removed: one entry per
-  // 款式, stacked in a COLUMN. A horizontal row of 款式 was rejected because it
-  // spent the image's height; asserting the direction is how that stays true.
+  // The rail is a rail, not the horizontal image strip below the cover: one entry per
+  // 款式, stacked in a COLUMN — a horizontal row of 款式 was rejected because it spent
+  // the image's height. The strip under the cover is a different thing and is the row;
+  // asserting the direction here is how the two stay distinct.
   let rail = null;
   (function walk(node) {
     if (node === null || node === undefined || typeof node !== "object") return;
@@ -821,10 +1098,11 @@ test("a 商品 opens as a modal: 款式 rail, cover, arrows, contact sheet — n
     walk(node.children);
   })(tree);
   assert.ok(rail, "the modal must render a rail holding the 款式 thumbnails");
-  assert.equal(rail.props.style.flexDirection, "column", "the 款式 list must be a vertical rail, not a bottom strip");
+  assert.equal(rail.props.style.flexDirection, "column", "the 款式 list must be a vertical rail, not a horizontal row");
   const railEntries = (Array.isArray(rail.children) ? rail.children : [rail.children])
     .filter(function (kid) { return kid && kid.type === "button"; });
   assert.equal(railEntries.length, 2, "one rail entry per 款式, got " + railEntries.length);
+  assert.notEqual(rail.props.style.overflowX, "auto", "and it must not scroll sideways like the strip");
 
   // The cover must be BOUNDED by its stage, never sized to the file. The page's
   // first version used `width/height: 100%` inside an indefinite-height row, so
@@ -928,7 +1206,8 @@ test("clicking a card opens its 商品 (not its own composite key)", () => {
   (function walk(node) {
     if (node === null || node === undefined || typeof node !== "object") return;
     if (Array.isArray(node)) { node.forEach(walk); return; }
-    if (node.type === "img" && node.props && String(node.props.src).indexOf("a-1.png") !== -1) cover = node;
+    // The cover is the 款式's 白底图 now, so the card is showing t1.png — not a 成片.
+    if (node.type === "img" && node.props && String(node.props.src).indexOf("t1.png") !== -1) cover = node;
     walk(node.children);
   })(tree);
   assert.ok(cover, "the feed must render a card cover to click");
@@ -940,7 +1219,9 @@ test("clicking a card opens its 商品 (not its own composite key)", () => {
   });
   assert.equal(opened.length, 1, "clicking must ask to open exactly one page");
   assert.equal(opened[0].groupKey, "商品A", "it must open the 商品, not the card's composite key");
-  assert.equal(opened[0].shotId, "p1", "and land on the shot the card is showing");
+  // null, because the cover is not a shot: the product page opens on its own
+  // 产品展示图, which is the very image the card was showing.
+  assert.equal(opened[0].shotId, null, "opening from the cover names no shot");
 });
 
 test("tapping a shot in the waterfall opens its 商品 on that shot", () => {
@@ -959,6 +1240,10 @@ test("tapping a shot in the waterfall opens its 商品 on that shot", () => {
   const text = collectText(render(loaded.view({}), 0), []);
   // The counter is its own text node, so assert on the node, not on a substring
   // of it (the info block also contains numbers in the same shape).
+  //
+  // 3 of 3, not 2 of 2: p2 is the second 成片 of 款式 #1, and the strip it lives in now
+  // leads with that 款式's 产品展示图. The offset is the point — the feed's shot id must
+  // still land on that shot rather than on whatever now sits at the same index.
   const counters = text.filter(function (line) { return /^第 \d+ \/ \d+ 张$/.test(line); });
-  assert.deepEqual(counters, ["第 2 / 2 张"], "the modal must open on the tapped shot, not on the first one");
+  assert.deepEqual(counters, ["第 3 / 3 张"], "the modal must open on the tapped shot, not on the first one");
 });

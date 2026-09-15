@@ -181,6 +181,20 @@ then the title (`商品A · 款式 #1`), a strong spec line where Taobao puts th
 with the T恤 underneath — the closest thing this data has to a shop. The whole
 text block is clickable, not just the image.
 
+**The cover is the 白底图 — the 融合 output — and the 成片 sit behind the swipe.**
+A 成片 is the wrong cover for a shelf: the shots of one 款式 are ONE garment in eight
+different scenes, so a grid of them reads as eight products rather than one, and the
+backgrounds (street, indoors, day, night) make the grid noisy. Against white the only
+thing that changes from card to card is the print, which is the thing being chosen —
+and it is what a real listing leads with. The card's slides are therefore
+`[白底图, ...成片]`, the same order as the product page's strip; the badge still
+counts 成片, because the 白底图 is not one.
+
+One consequence to expect on old data: the previous pipeline stamped the print onto
+**every** 白底图 including the back view, so some of those 190 records have a
+print-on-the-back composite. The cover now shows that honestly instead of hiding it
+behind a scene shot. Re-run groups do not have this.
+
 What is deliberately **not** copied: price, 销量 and 店铺评分. There is no such data
 here, and inventing numbers on a shelf used to decide what to publish would be
 worse than leaving the slot empty; a test asserts no price or sales figure can
@@ -197,12 +211,49 @@ image, or use its ‹ › arrows).
 **Clicking a card opens a modal shaped like a Taobao product page.** The **left
 rail lists every 款式 of that 商品** — Taobao's SKU list, selected one outlined —
 so comparing two colourways no longer means closing the modal and finding another
-card. The middle is that 款式's gallery: big image, ‹ ›, a counter
-(`第 2 / 8 张`), click to zoom. The right column says what the shot is made of
-(the scene photo and the 二创T恤), shows **the 款式's whole contact sheet** as a
-40px grid (the rail used to do this job; now that it holds 款式, the shots need
-somewhere to be seen at a glance), and lists the product's own numbers. Arrow keys
-move between shots; Esc or the backdrop closes it.
+card. The middle is that 款式's images: big image, ‹ ›, a counter (`第 2 / 8 张`),
+click to zoom. The right column says what the current image is made of (the scene
+photo and the 二创T恤) and lists the product's own numbers. Arrow keys move between
+images; Esc or the backdrop closes it.
+
+**Everything a 款式 has lives in one strip under the big image**, and the stage, the
+‹ › arrows, the counter, the keyboard and the strip are all backed by that single
+list — so "the current image" means one thing rather than a gallery that disagrees
+with a panel:
+
+1. **产品展示图** — the 融合 output itself, the printed garment on its white background.
+   It leads the strip because it is the listing's主图 and the one picture that shows
+   what is being sold with no scene around it. It was already being made (147 of them
+   exist) while the shelf only ever used it as a grouping key.
+2. the 款式's **成片**.
+3. **尺码图** — carried straight from the T恤 record, resolved through the same origin
+   lookup as the garment line so records written before those fields existed still find
+   theirs. Shown and **never generated**: a size table is a diagram with numbers on it,
+   and a model asked to draw one invents the numbers. It belongs to the T恤 rather than
+   to a colour, so every 款式 of a garment shares one.
+
+Two consequences worth knowing. The strip is `contain`, not `cover` — a 尺码图 cropped
+to a 3:4 box cuts the table, and the 成片 are 3:4 anyway so nothing is lost. And the
+last two entries are not shots: 删除这张 and 生成于 only appear on an 成片, because
+deleting the 产品展示图 from here would be deleting a 融合 record and a 尺码图 is an
+upload.
+
+The T恤's 细节图 and 模特图 are deliberately **not** in the strip. They are supplier
+shots of the *blank* garment, so a listing assembled from them would show a printed
+main image next to an unprinted collar close-up — the buyer can see they are not the
+same item. What a detail section needs is a close-up of *this* print, which does not
+exist yet.
+
+**Which garment a card is, is resolved live rather than read off the shot.** The card
+and the modal both print `T恤 · 款式` — without the 款式, the six products of one T恤
+are six copies of the same line and the shelf cannot be judged. It is worked out as
+composite → its 二创T恤 row → the T恤 photo it was composited onto → the 款式 owning
+that photo, both steps indexed once per render. Reading it off the shot would fail
+twice over: records written before those fields existed carry no `tshirtName` at all
+(117 of the first 307 do), and a name baked in at generation time goes stale the
+moment the T恤 or its 款式 is renamed — which is exactly when someone is looking at
+this line to check they renamed the right thing. A shot whose composite is no longer
+in 二创T恤 falls back to the name the record itself stored.
 
 It is a modal rather than a page because a page would replace the shelf and lose
 the browsing context you just had, and it still has **no 款式 strip along the
@@ -255,12 +306,37 @@ next to the buttons that act on it.
 一组参考图（同一商品的多个角度截图）
  ① 提取印花   the whole group is passed to the extractor together      → 1 张
  ② 印花二创   every 「印花二创-N」 prompt runs once, 2 outputs each      → 4 × 2 = 8 张
- ③ T恤融合    every re-created print × every selected 款式 (T恤 photo)  → 8 × 3 = 24 张
+ ③ T恤融合    every re-created print × every selected 款式 (a colour)   → 8 × 3 = 24 张
  ④ 换装裂变   every composite, 2 passes of 4, [random 场景图, composite] → 24 × 8 = 192 张
 ```
 
+Images get into a group two ways, and both stage into the same place: 选择图片
+(a file picker) and **paste**. 参考图分组 registers a document-level paste listener
+for the second one, gated on the workbench showing 工作流 — every view stays mounted
+(inactive ones hidden with `display:none`, not unmounted), so an ungated listener
+silently takes an image pasted into 印花提取 and the symptom is an image in the wrong
+place rather than an error. It is skipped while the caret is in a text field, because
+the chat composer below the workbench is one. Nothing is written until 创建分组, so a
+pasted screenshot is just another pending tile that can be removed before submitting.
+
 **That is 1 + 8 + 24 + 192 = 225 provider calls per group**, roughly two hours at
 the host's concurrency of 2. Every number below exists because of that one.
+
+**Scenes are dealt from one deck for the whole run.** Each 款式 is shot in
+`sceneCount` different scenes and every shot of a scene shares it, but the pool is
+**not** copied per 款式 — it is shuffled once and consumed, reshuffled only when it
+runs out, and the scenes this group has already been shot in are removed from the
+first deck so a resumed run carries on into fresh backgrounds. The per-款式 copy that
+came before made "without replacement" true only *inside* one 款式, and the effect over
+a run was a handful of backgrounds reused over and over: measured on this machine's
+first two runs, one scene used 14 times, another 13, and just 2 of 228 used exactly
+once. That is what 经常选到同一张 looks like from the outside.
+
+The property worth asserting is **evenness, not coverage**: 320 shots over a 20-scene
+pool is exactly 16 each when the deck is shared, while independent per-款式 draws give
+a lopsided histogram. Coverage alone does not discriminate — enough draws cover the
+pool either way — and the first version of that test passed against the deliberately
+broken code because of it.
 
 **Intake: upload or folder, one place.** The inbox is
 `$DSH_HOME/ecommerce-workbench/workflow-inbox/print.pipeline/`, and **one
@@ -273,14 +349,105 @@ angles of one product into three separate 225-call runs, each extracting a print
 from a third of the information. The estimate warns about that bucket instead,
 and the fix — move them into a subfolder — stays with the user.
 
-**The T恤 and its 款式.** The group stores which T恤 it runs against; the
-default is the first T恤 and **all** of its photos, because that is what 「所有款式」
-means here: one photo is one 款式 (the existing T恤二创 model, which also renders
-one composite per photo). On this machine that is one T恤 with three photos, which
-is exactly the 3 × 8 = 24 the feature was specified with. A stored selection that
-no longer matches the T恤 (a photo was deleted, or the T恤 was switched) falls
-back to the default *and says so*, rather than degrading to "generate nothing" —
-the fallback is what the user would have got had they never picked.
+**A group's own screenshots are shown on its row**, because a group is called 「组3」
+and "3 张参考图" is not an identity — screenshots of three different products look
+identical until you can see them. They are served by
+`GET /ecom/api/workflow/group/image?groupKey=…&name=…`, **not** by `/ecom/api/file/`:
+a group's photos are read straight off disk by the pipeline and never copied into the
+store, so `group.images` holds uploaded file names rather than store ids. Both halves
+of that query come from the client, so both are checked before either reaches the
+filesystem — the key cannot climb out of the inbox root, the file name cannot climb
+out of the group's folder, and a test asserts both rather than trusting the encoder.
+
+**A T恤 is a product grouped by 款式, and a 款式 is a colour.** Each 款式 owns three
+buckets: **白底图** (one or more — a colour shot from the front *and* the back is two
+白底图 of the same colour, and each becomes its own product), **细节图** (collar,
+cuff, fabric), and **模特上身图** (the colour on a body). **尺码图** hang off the
+product, not the colour: one pattern means one size chart, so repeating it per colour
+would be N copies of the same table.
+
+Only 白底图 and 细节图 do any work in generation. A **模特上身图** is a listing asset
+and is deliberately kept out of `images` — fold it in and the pipeline would start
+rendering one product per model shot. It is likewise never sent to a step: 融合
+already gets the 细节图, and 换装+裂变 addresses its references as 图1/图2, so a third
+one would shift that contract rather than inform it. Giving it a job there would mean
+rewriting that prompt's positional contract first.
+
+`store.normalizeTshirt` is the canonical shape. It also keeps `images` as a
+**derived** field — every 白底图 across every 款式, in order, and nothing else — which
+is what the pipeline composites and what 二创 picks from, so every reader that
+predates 款式 keeps working. Writers must not append to it: it is recomputed on every
+read, so an edit made to the derived array alone is silently dropped. The normalizer
+runs on read rather than as a one-shot migration because `state.json` is also edited
+by hand and restored from backups, and a record that predates the model must not
+become unreadable because it was put back. A flat record is read as one 款式 per photo,
+with that photo as its only 白底图 — lossless, and the same reading the pipeline
+already made of it, so a group that ran before this change resolves to the same
+shots after it.
+
+**The group stores which T恤 and which 款式 it runs against.** The default is the
+first T恤 and **all** of its 款式, which is what 「所有款式」 has always meant. A stored
+selection that no longer resolves (the 款式 was deleted, or the T恤 was switched)
+falls back to the default *and says so*, rather than degrading to "generate nothing"
+— the fallback is what the user would have got had they never picked. The older
+per-photo `tshirtImages` is still honoured, read as "the 款式 that own those photos",
+so a group configured before 款式 existed keeps generating exactly what it used to.
+
+**融合 takes the whole 款式, and the model finds the front itself.** One composite
+per (印花 × 款式), not per (印花 × 白底图). Every photo the 款式 owns goes in as a
+reference — 白底图, then 细节图, then 模特图 — and the **印花 is appended last**, so
+the prompt can say 前面几张是这件衣服…最后一张是要印上去的图案.
+
+Two things forced this shape:
+
+- **Nothing in the data says which 白底图 is the front.** They are front, back and
+  further angles in whatever order they were uploaded — on this machine one real
+  款式 is literally 背面, 正面, 正面. Anything the pipeline picked as "the front"
+  would be a guess, and the guess it used to make (loop over every 白底图) stamped
+  the print onto the back as well. Letting the model look at the whole 款式 is the
+  only version of this that is not a guess, and it needs no user action.
+- **The reference photos already carry a print.** The supplier shots for one 款式
+  have a finished design on the chest, so the prompt has to say 原本印着的图案要
+  完全去掉 — without it the result is two designs on top of each other.
+- **The prompts must not name a garment.** 「T恤」 in this workbench is the *module*
+  name — 印花T恤融合, T恤管理, T恤二创 — and reusing it inside a generation prompt is
+  a different thing entirely: it asserts what the garment is. The catalogue this
+  runs on is 圆领卫衣, 连帽有绳/无绳卫衣, 长袖T, 无袖背心, V领无袖, 露脐短袖 and tees, so
+  an instruction to take the print off a 「T恤」, or to render a neckline that
+  「过渡到T恤领口」, is simply wrong for half of them. Prompts therefore say
+  这件衣服 / 图2那件衣服, and structural claims are conditional: 袖长（无袖款就是
+  无袖）, 领口、袖口（如有）, 下摆自然垂坠，有袖的款式袖口同样自然垂坠. The one
+  surviving 「T恤」 is deliberate — 图1's own top is enumerated as 不论它是T恤、背心、
+  抹胸、吊带…, where naming T恤 is the point.
+
+Leading with the 印花 instead of the garment also works: both orders were measured
+on a real 6-reference 款式 and both picked the front and replaced the existing print
+correctly. Garment-first wins because the composition then anchors on the real
+article rather than on the artwork.
+
+尺码图 are deliberately never sent: a size table is a diagram, not evidence about
+fabric. Nothing extra goes to 换装+裂变 either, which addresses its references as
+图1/图2 and would break if the list grew.
+
+Both steps now pass an explicit `--size 3:4`. The service defaults to 1:1, and a
+square reply is not a crop of a 3:4 one — the composition was planned for a square
+frame — so the garment arrived re-arranged and could not be cropped back. 换装+裂变
+passes it too, which is what its prompt's 3:4竖版 has always claimed.
+
+That choice is made in **two** places, both of which are moments you are deciding
+it: 创建分组 (next to 分组名 — that is where a group is being set up, so the choice
+belongs with it, and it is stored against the new group as soon as the upload
+returns a key, *before* the estimate opens, so the price cannot be quoted against
+the old choice) and the group's own row in 分组与队列 (for changing it later).
+The row prints the choice **in force** (resolved the same way `resolveTshirt`
+resolves it) rather than "未选": the default is a real choice the run is about to
+make, and it existing on the host while being invisible in the UI is exactly why
+the selection looked broken. There is no save button — the picked value is a draft
+that rides along with the things that start a group: 「创建分组」, 「排队」/「只确认」
+(which is the route the host stores it on) and 「确认并立即运行」 (which does not go
+through that route, so it saves first). Merely opening the picker and clicking a
+款式 writes nothing, so changing the selection cannot re-queue a group that already
+finished.
 
 **Prompts come from 提示词管理, matched by exact name**: `印花提取`,
 `印花二创-1…N` (ordered by the numeric suffix, not alphabetically),
@@ -704,11 +871,11 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 ## Verify
 
 - Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowSettings.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js && node --check lib/printPipeline.js`
-- Tests: `node --test "test/*.test.js"` (**97/97 pass**). (The quoted glob is
+- Tests: `node --test "test/*.test.js"` (**101/101 pass**). (The quoted glob is
   required: `node --test test/` is not usable on this Node/Windows combination —
   it tries to load the directory as a module. The three files can also be listed
   explicitly.)
-  - `test/host-api.test.js` (67) covers the original lifecycle — timing-based
+  - `test/host-api.test.js` (69) covers the original lifecycle — timing-based
     concurrency proofs, partial-failure proofs (one flaky item still leaves the
     rest of the batch intact, using provider stubs), T恤 create/add-images/
     delete/clear, T恤二创 single-pair/cross-product/photo-choice/reject-unknown/
@@ -729,7 +896,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     workflow's provider calls go through the shared semaphore while
     `withGeneration` is unreachable, and that config + history survive reopening
     the store.
-  - `test/print-pipeline.test.js` (17) drives 印花流水线 through the real handler
+  - `test/print-pipeline.test.js` (18) drives 印花流水线 through the real handler
     with a counting stub provider, so a run's real cost is asserted exactly:
     **一组的 225 次调用** (1 extract + 8 recreate + 24 T恤 + 192 场景, from 4
     prompts × 2, 3 款式, 2 passes × 4), that a second run costs nothing, that a
@@ -742,13 +909,16 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     leaving the queue and re-approval re-queuing it, listing/removing products
     with their bytes, deleting a group while keeping its products, and a stale
     T恤 selection falling back to every photo.
-  - `test/client-render.test.js` (13) builds the real client component tree with
+  - `test/client-render.test.js` (14) builds the real client component tree with
     a minimal React stand-in, covering both levels of 工作流 (the list, and a
     workflow's page split into its three tabs — the settings tab, and the history
     tab with its runs and log, each asserted not to render the other's content),
     the pipeline group panel (group rows, the 225-call estimate and all four
     result stages rendered *inside the row they belong to* — asserted down to the
-    image `src` each stage renders), the 成品库 (one card per 款式, the other shots
+    image `src` each stage renders — and the row's T恤 choice, asserted by
+    *counting* the rendered labels so that ignoring the stored `tshirtId` shows up
+    as the first T恤 appearing three times instead of once; verified by mutating
+    the lookup and watching it fail), the 成品库 (one card per 款式, the other shots
     behind the swipe, every Taobao-card line — title, spec, tags, the T恤 — and
     **no price or 销量**, since the shelf has no such data and must not invent it;
     a square stage that contains rather than crops; then the modal: the fixed

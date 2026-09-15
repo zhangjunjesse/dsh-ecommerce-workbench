@@ -412,6 +412,118 @@ test("tshirt/addImages appends more photos to an existing T恤 over time", async
   assert.equal(missing.status, 404);
 });
 
+test("a T恤 is grouped into 款式: 白底图 and 细节图 per colour, 尺码图 on the product", async () => {
+  // The model this guards. A T恤 is not a pile of photos: a 款式 (a colour) owns
+  // its 白底图 and its 细节图, and picking that 款式 downstream is what brings the
+  // 细节图 along — which only works if they are stored as belonging to it.
+  const { handler, store } = await freshHandler();
+  const created = await call(handler, "POST", "/ecom/api/tshirt/create", {
+    name: "180G", colorwayName: "白色",
+    images: [{ name: "front.png", dataUrl: PNG_DATA_URL }, { name: "back.png", dataUrl: PNG_DATA_URL }]
+  });
+  const tshirtId = created.json.tshirt.id;
+  const white = created.json.tshirt.colorways[0];
+  assert.equal(created.json.tshirt.colorways.length, 1, "the first upload IS the first 款式");
+  assert.equal(white.name, "白色");
+  assert.equal(white.white.length, 2, "front and back are both 白底图 of the same colour");
+  assert.equal(created.json.tshirt.images.length, 2, "images stays as the derived 白底图 list");
+
+  const added = await call(handler, "POST", "/ecom/api/tshirt/addColorway", { id: tshirtId, name: "黑色" });
+  assert.equal(added.json.tshirt.colorways.length, 2);
+  const blackId = added.json.tshirt.colorways[1].id;
+
+  const withDetail = await call(handler, "POST", "/ecom/api/tshirt/addImages", {
+    id: tshirtId, colorwayId: white.id, slot: "detail",
+    images: [{ name: "collar.png", dataUrl: PNG_DATA_URL }]
+  });
+  const w = withDetail.json.tshirt.colorways.filter(function (c) { return c.id === white.id; })[0];
+  assert.equal(w.detail.length, 1, "the 细节图 belongs to 白色, not to the pile");
+  assert.equal(w.white.length, 2, "and adding one does not disturb its 白底图");
+  assert.equal(withDetail.json.tshirt.images.length, 2, "a 细节图 is not a 白底图, so images does not grow");
+
+  // A 模特上身图 is a listing asset, not a composite target. It must land in its
+  // own bucket and — the part that matters — must NOT join `images`, or the
+  // pipeline would start rendering one product per model shot.
+  const onModel = await call(handler, "POST", "/ecom/api/tshirt/addImages", {
+    id: tshirtId, colorwayId: white.id, slot: "model",
+    images: [{ name: "on-model.png", dataUrl: PNG_DATA_URL }]
+  });
+  const wm = onModel.json.tshirt.colorways.filter(function (c) { return c.id === white.id; })[0];
+  assert.equal(wm.model.length, 1, "the 模特上身图 belongs to 白色");
+  assert.equal(wm.white.length, 2, "and does not disturb its 白底图");
+  assert.equal(onModel.json.tshirt.images.length, 2, "a 模特上身图 is not a composite target");
+
+  // It is removable through the same one-file route as any other bucket — the
+  // caller knows the file name and not which bucket holds it.
+  await call(handler, "POST", "/ecom/api/delete", { kind: "tshirtImage", id: tshirtId, file: wm.model[0] });
+  const afterDrop = await call(handler, "GET", "/ecom/api/state");
+  const wAfterDrop = afterDrop.json.tshirts[0].colorways.filter(function (c) { return c.id === white.id; })[0];
+  assert.equal(wAfterDrop.model.length, 0);
+  assert.equal(wAfterDrop.detail.length, 1, "removing it must not touch the neighbouring bucket");
+
+  // 尺码图 hang off the product: one pattern means one size chart, so repeating it
+  // per colour would be N copies of the same table.
+  const sized = await call(handler, "POST", "/ecom/api/tshirt/addImages", {
+    id: tshirtId, slot: "size", images: [{ name: "size.png", dataUrl: PNG_DATA_URL }]
+  });
+  assert.equal(sized.json.tshirt.sizeImages.length, 1);
+  assert.equal(sized.json.tshirt.images.length, 2, "a 尺码图 is not a product shot either");
+
+  // An unknown 款式 is refused rather than quietly filed under the first colour:
+  // the bytes are already on disk, so a wrong-but-successful reply would misfile
+  // them and nothing downstream could tell.
+  const bogus = await call(handler, "POST", "/ecom/api/tshirt/addImages", {
+    id: tshirtId, colorwayId: "nope", slot: "white",
+    images: [{ name: "x.png", dataUrl: PNG_DATA_URL }]
+  });
+  assert.equal(bogus.status, 404);
+
+  // Deleting a 款式 takes its own bytes with it and leaves the other colour alone.
+  const blackWithPhoto = await call(handler, "POST", "/ecom/api/tshirt/addImages", {
+    id: tshirtId, colorwayId: blackId, slot: "white",
+    images: [{ name: "black-front.png", dataUrl: PNG_DATA_URL }]
+  });
+  assert.equal(blackWithPhoto.json.tshirt.images.length, 3);
+  const before = (await readdir(store.filesDir)).length;
+  await call(handler, "POST", "/ecom/api/delete", { kind: "tshirtColorway", id: tshirtId, colorwayId: blackId });
+  const after = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(after.json.tshirts[0].colorways.length, 1, "only 白色 is left");
+  assert.equal(after.json.tshirts[0].images.length, 2, "its photo left the derived list too");
+  assert.equal((await readdir(store.filesDir)).length, before - 1, "the 款式's bytes went with it");
+});
+
+test("a T恤 and its 款式 can each be renamed, without disturbing the other", async () => {
+  // The T恤 name is quoted by the group picker and copied onto every product
+  // record, and the 款式 name is what the picker lists — so a typo at 创建T恤 time
+  // would otherwise follow the garment for good.
+  const { handler } = await freshHandler();
+  const created = await call(handler, "POST", "/ecom/api/tshirt/create", {
+    name: "错字T血", colorwayName: "白色", images: [{ name: "a.png", dataUrl: PNG_DATA_URL }]
+  });
+  const tshirtId = created.json.tshirt.id;
+  const colorwayId = created.json.tshirt.colorways[0].id;
+
+  const renamed = await call(handler, "POST", "/ecom/api/tshirt/rename", { id: tshirtId, name: "180G女士纯棉T恤" });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.json.tshirt.name, "180G女士纯棉T恤");
+  assert.equal(renamed.json.tshirt.colorways[0].name, "白色", "renaming the product leaves its 款式 alone");
+
+  const renamedColorway = await call(handler, "POST", "/ecom/api/tshirt/rename", {
+    id: tshirtId, colorwayId: colorwayId, name: "米白"
+  });
+  assert.equal(renamedColorway.json.tshirt.colorways[0].name, "米白");
+  assert.equal(renamedColorway.json.tshirt.name, "180G女士纯棉T恤", "and the 款式 rename leaves the product alone");
+
+  // A blank name is refused rather than stored: an unnamed T恤 is unusable in the
+  // picker, and the reply is the only place the client would learn that.
+  const blank = await call(handler, "POST", "/ecom/api/tshirt/rename", { id: tshirtId, name: "   " });
+  assert.equal(blank.status, 400);
+
+  const persisted = await call(handler, "GET", "/ecom/api/state");
+  assert.equal(persisted.json.tshirts[0].name, "180G女士纯棉T恤", "both renames are durable");
+  assert.equal(persisted.json.tshirts[0].colorways[0].name, "米白");
+});
+
 test("deleting one T恤 image keeps the T恤; deleting the whole T恤 removes all its files", async () => {
   const { handler, store } = await freshHandler();
   const created = await call(handler, "POST", "/ecom/api/tshirt/create", {
