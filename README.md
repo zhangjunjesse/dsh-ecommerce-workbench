@@ -281,6 +281,60 @@ them on records written before that by looking the composite up in
 `tshirtRecreations` — nothing is inferred, it is idempotent, and it reports any
 shot whose row is gone rather than guessing.
 
+### 标签: turning a shelf you can read into one you can manage
+
+The shelf could only ever be *read*. Tags are what make it a thing you **manage**:
+which 款式 are ready to list, which platforms they are for, which are set aside —
+decisions about the goods that had nowhere to live before (see
+`docs/DECISION-0004-product-tags.md`).
+
+**A tag is attached to a 款式 — the card — keyed `<groupKey>|<composite file>`.** That
+is the same key the feed already uses for its cards and the same one
+`workflow-outputs.json` can be asked about, so the host can check a tag against the
+artefacts themselves and **a tag can never name goods that do not exist**. The
+alternative — the pipeline's logical key `cw:<款式id>|<印花>` — survives 强制重跑 (which
+mints new composite files) but needs a lookup that 117 of the first 307 shot records
+cannot answer at all, and a tag that can be "unresolvable" has three states where it
+should have two. Resume-style re-runs reuse the same files and keep their tags;
+a forced re-run leaves the old tagged cards in place and adds untagged ones, which
+v2 will carry over by logical key.
+
+**Tags live in their own document** (`product-tags.json`,
+`{ tags: [{id, name, group, color}], assigns: { "<key>": ["<tagId>", …] } }`), not on
+the shot records and not in the polled `state.json`: one 款式 is eight shot records,
+so a per-record tag would be eight copies that can disagree. Tags are addressed by
+**id**, never by name — renaming one moves no assignment, which is the whole point of
+"flexible".
+
+**The UI is a filter row, a selection mode, and two dialogs.** The 成品库 toolbar
+carries every tag with how many 款式 *in the current 商品* hold it, plus 未打标签
+(the clearing-the-backlog question) and 管理标签. 选择 turns every card into a
+checkbox — the one interaction that changes, and only while selecting, since a tap
+must otherwise keep opening the 商品 — and the bar's 全选当前筛选结果 selects the whole
+filtered set rather than the page currently painted, because a paginated waterfall
+has no honest notion of "everything between these two tiles". Batch applying is **one
+request for the whole selection**, and each row of the dialog says `2/2 已有` /
+`1/2 已有` / `未使用` before you press 加上 or 移除 — two buttons, because a tri-state
+box cannot say which way a click will go in the "partly applied" state a batch is
+most often in. The product page carries the current 款式's tags too, with
+「应用到本商品全部款式」 — add-only, so a bulk action never strips another 款式's own tags.
+
+**A tag that names nothing is cleaned up, never silently.** Deleting a tag takes it
+off every card in the same write; an assignment naming a *deleted tag* is dropped on
+read (an id with no tag behind it means nothing). An assignment naming a *款式 that
+left the shelf* is deliberately **not** swept on read — that would mean reading the
+whole 540 KB product library on every request — so the manager reports 失效记录 and
+offers 清理 through its own route. Deleting a 款式's last 成片 therefore leaves a stale
+entry that is visible and clearable rather than invisible.
+
+Host routes: `GET /ecom/api/product/tags`, `POST /ecom/api/product/tag` (create /
+rename / recolour), `POST /ecom/api/product/tag/apply` (`{keys, add?, remove?}` →
+`{applied, skipped}`), `POST /ecom/api/product/tag/prune`, and `kind: "tag"` /
+`kind: "tags"` on the shared `/delete` and `/clear`. An **unknown tag id is a 400**
+(a stale client must not look like it worked) while an **unknown 款式 key is skipped
+and reported** (a card deleted between selecting and applying is a race, and failing
+the whole batch would turn a normal action into an error).
+
 ## 印花流水线
 
 The workbench's first real workflow (`print.pipeline`, `lib/printPipeline.js`): a
@@ -773,7 +827,7 @@ selection click.
 | File | Half | Role |
 |---|---|---|
 | `lib/index.js` | Host | Serves the `/ecom/api` JSON API (state / extract / recreate / tshirtRecreate / importFolder / importFiles / generate / scene/add / delete / clear / file / job / jobs / tshirt / prompt / workflow/*) and picks the image provider (ToAPIs, else local passthrough). |
-| `lib/store.js` | Host | Durable store: `state.json` metadata + `workflow-runs.json` run history + `workflow-outputs.json` product library + `files/<id>.<ext>` image bytes under `$DSH_HOME/ecommerce-workbench`. Every document is replaced atomically (temp file + rename) so a concurrent read can never see a half-written file. |
+| `lib/store.js` | Host | Durable store: `state.json` metadata + `workflow-runs.json` run history + `workflow-outputs.json` product library + `product-tags.json` the 成品库 shelf's tags + `files/<id>.<ext>` image bytes under `$DSH_HOME/ecommerce-workbench`. Every document is replaced atomically (temp file + rename) so a concurrent read can never see a half-written file, and each has its own write lock so one document's writes never block another's. |
 | `lib/imageSize.js` | Host | Dependency-free image header reader (PNG/GIF/JPEG/WebP). Returns `null` rather than guessing, because a guessed ratio is what stretches a photo. |
 | `lib/provider.js` | Host | Provider seam. `createToapisProvider()` shells out to `toapis-gpt-image-2/scripts/generate.py` (edit mode) for real extraction/二创/T恤二创 (`extract`/`recreate`/`applyToTshirt`); `createLocalProvider()` is a no-network passthrough fallback. |
 | `lib/workflows.js` | Host | The workflow registry: the one place a workflow is declared and validated at mount. Holds no state. |
@@ -786,10 +840,11 @@ selection click.
 | `scripts/backfill-output-fields.js` | Repo tool | One-off, idempotent: names the 款式 on 成品 records written before those fields existed, by looking each shot's composite up in `tshirtRecreations`. Not part of the plugin (`package.json#files` excludes it) — it is a repair tool for the store on disk. |
 | `test/host-api.test.js` | Test | Drives the real handler + store through the full extract → recreate → delete → clear lifecycle (with the local provider), plus the workflow engine end to end: config, manual runs, failure, single-flight, scheduling, missed occurrences, retention, crash recovery, and persistence. |
 | `test/print-pipeline.test.js` | Test | Drives 印花流水线 through the real handler with a counting provider stub: the 225-call arithmetic, resume-instead-of-repay, the hard ceiling, missing-prompt reporting, the loose-files bucket, upload collision and traversal, approval gating, product deletion, and that deleting a group keeps what it produced. |
-| `test/client-render.test.js` | Test | Builds the real client component tree with a minimal React stand-in, covering the 工作流 empty state, list rows, the detail page's three tabs (settings, history, and that each tab's content stays on its own tab), the pipeline panel (group rows, the inline estimate and all four result stages) and the nav/view alignment invariant — the parts a syntax check cannot validate. |
+| `test/client-render.test.js` | Test | Builds the real client component tree with a minimal React stand-in, covering the 工作流 empty state, list rows, the detail page's three tabs (settings, history, and that each tab's content stays on its own tab), the pipeline panel (group rows, the inline estimate and all four result stages), the 成品库 (cards, the product page and its 款式 rail, and the tag row, the selection bar, the batch dialog and the manager — including that the whole selection goes out as ONE request keyed the way the host keys it) and the nav/view alignment invariant — the parts a syntax check cannot validate. |
 | `docs/DECISION-0001-*.md` | Decision | Owning decision record for the workbench-as-view-tab design. |
 | `docs/DECISION-0002-*.md` | Decision | Owning decision record for the workflow engine (why workflows are code, why schedules are two shapes, why misses are skipped). |
 | `docs/DECISION-0003-*.md` | Decision | Owning decision record for 印花流水线 (why one group per run, why resume is derived from artefacts, why its products do not go back into the scene pool). |
+| `docs/DECISION-0004-product-tags.md` | Decision | Owning decision record for 成品库 tags (why tags hang off a 款式 and not a file name, why they are their own document, why an unknown tag is refused while an unknown 款式 is skipped, why stale assignments are reported rather than swept). |
 
 ## Wiring
 
@@ -871,11 +926,11 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
 ## Verify
 
 - Syntax: `node --check lib/client.js && node --check lib/index.js && node --check lib/store.js && node --check lib/provider.js && node --check lib/workflows.js && node --check lib/workflowSettings.js && node --check lib/workflowRunner.js && node --check lib/scheduler.js && node --check lib/printPipeline.js`
-- Tests: `node --test "test/*.test.js"` (**105/105 pass**). (The quoted glob is
+- Tests: `node --test "test/*.test.js"` (**118/118 pass**). (The quoted glob is
   required: `node --test test/` is not usable on this Node/Windows combination —
   it tries to load the directory as a module. The three files can also be listed
   explicitly.)
-  - `test/host-api.test.js` (69) covers the original lifecycle — timing-based
+  - `test/host-api.test.js` (75) covers the original lifecycle — timing-based
     concurrency proofs, partial-failure proofs (one flaky item still leaves the
     rest of the batch intact, using provider stubs), T恤 create/add-images/
     delete/clear and its 款式 model (白底图/细节图 grouped per colour with 尺码图 on
@@ -897,7 +952,15 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     log caps, history retention per workflow, clearing, crash recovery, that a
     workflow's provider calls go through the shared semaphore while
     `withGeneration` is unreachable, and that config + history survive reopening
-    the store.
+    the store. 成品库 tags are covered through the real routes too: that a tag is
+    one entry per 款式 rather than one per 成片, that renaming it moves no
+    assignment (they follow the id), that a batch refuses an unknown tag while
+    skipping a 款式 that is gone, that deleting a tag takes it off every card and
+    clearing empties the classification, that an assignment to a 款式 that left the
+    shelf survives a read and goes away on prune, that two tags cannot share a name
+    while one can be edited without tripping over its own, and that a hand-edited
+    document (duplicate ids, a duplicate assignment, a dangling tag id, a tag with
+    no id) reads back repaired instead of unreadable.
   - `test/print-pipeline.test.js` (20) drives 印花流水线 through the real handler
     with a counting stub provider, so a run's real cost is asserted exactly:
     **一组的 225 次调用** (1 extract + 8 recreate + 24 T恤 + 192 场景, from 4
@@ -911,7 +974,7 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     leaving the queue and re-approval re-queuing it, listing/removing products
     with their bytes, deleting a group while keeping its products, and a stale
     T恤 selection falling back to every photo.
-  - `test/client-render.test.js` (16) builds the real client component tree with
+  - `test/client-render.test.js` (23) builds the real client component tree with
     a minimal React stand-in, covering both levels of 工作流 (the list, and a
     workflow's page split into its three tabs — the settings tab, and the history
     tab with its runs and log, each asserted not to render the other's content),
@@ -929,7 +992,17 @@ the ToAPIs host to the child process's `no_proxy` so the request goes direct.
     entry per 款式, the contact sheet, both arrows, the counter, the image strip
     carrying the 产品展示图 and the T恤's 尺码图 (neither of them a generated shot), the
     source/commerce blocks — again down to each part's images; and that clicking a
-    card opens the 商品 *on the shot it was showing*), the
+    card opens the 商品 *on the shot it was showing*), the shelf's **tags** (that the
+    filter row lists every tag with how many 款式 in view hold it and how many hold
+    none, that the tags render on the cards themselves — which is what pins the
+    `<groupKey>|<composite>` key shape, since a card keyed differently would show
+    nothing — that picking a tag narrows the feed and says it did, that 选择模式
+    renders its own bar naming the whole filtered set and turns a card tap into a
+    selection rather than a navigation, that the batch dialog reports `2/2 已有` /
+    `1/2 已有` / `未使用` for the selection and sends ONE request keyed the way the
+    host keys it, that the manager deletes through `kind: "tag"` and reports
+    失效记录 before pruning them, and that the product page shows the shown 款式's own
+    tags and pushes them onto the whole 商品 **add-only**), the
     mount-time hydration (a behavioural test, so a module added
     to the load list but missed on the mount path fails here instead of silently
     rendering empty), the `shell.overlay` pill (registered into that slot with an

@@ -1617,3 +1617,187 @@ test("workflow config and history survive reopening the store", async () => {
   assert.equal(runs[0].status, "success");
   assert.equal(runs[0].workflowName, "测试回显");
 });
+
+// ---------------------------------------------------------------------------
+// 成品库 tags (see docs/DECISION-0004-product-tags.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * One 成片 of a 款式. Several of these share a `tshirtFile` — that is the point:
+ * one 款式 is many output rows, and a tag is a judgement about the 款式.
+ */
+function shot(groupKey, tshirtFile, n) {
+  return {
+    id: groupKey + "-" + tshirtFile + "-" + n,
+    workflowId: "print.pipeline",
+    groupKey: groupKey,
+    groupName: groupKey,
+    kind: "scene",
+    file: groupKey + "-" + tshirtFile + "-" + n + ".png",
+    tshirtFile: tshirtFile,
+    sceneIndex: n,
+    variant: 0,
+    createdAt: n
+  };
+}
+
+/** Put a product library in place without running a pipeline. */
+async function seedOutputs(store, rows) {
+  await store.updateOutputs(function (doc) { doc.outputs = rows; });
+}
+
+async function tagRoute(handler, path, body) {
+  return call(handler, "POST", path, body);
+}
+
+test("a tag names a 款式 by group|composite, and renaming it moves nothing", async () => {
+  const { handler, store } = await freshHandler();
+  await seedOutputs(store, [shot("组5", "a.png", 0), shot("组5", "a.png", 1), shot("组5", "b.png", 0)]);
+
+  const made = await tagRoute(handler, "/ecom/api/product/tag", { name: "待上架", group: "上架状态" });
+  assert.equal(made.status, 200);
+  const tagId = made.json.tag.id;
+  assert.equal(made.json.tag.group, "上架状态");
+
+  const applied = await tagRoute(handler, "/ecom/api/product/tag/apply", { keys: ["组5|a.png"], add: [tagId] });
+  assert.equal(applied.status, 200);
+  assert.equal(applied.json.applied, 1);
+  assert.deepEqual(applied.json.skipped, []);
+
+  // One entry per 款式, not one per 成片: 组5|a.png has two shots and one card.
+  let doc = (await call(handler, "GET", "/ecom/api/product/tags")).json;
+  assert.deepEqual(Object.keys(doc.assigns), ["组5|a.png"]);
+  assert.deepEqual(doc.assigns["组5|a.png"], [tagId]);
+
+  const renamed = await tagRoute(handler, "/ecom/api/product/tag", { id: tagId, name: "准备上架" });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.json.tag.group, "上架状态", "a rename keeps the 维度 it was not asked to change");
+  doc = (await call(handler, "GET", "/ecom/api/product/tags")).json;
+  assert.equal(doc.tags[0].name, "准备上架");
+  assert.deepEqual(doc.assigns["组5|a.png"], [tagId], "the assignment follows the id, never the name");
+});
+
+test("tagging a selection refuses an unknown tag but skips a 款式 that is gone", async () => {
+  const { handler, store } = await freshHandler();
+  await seedOutputs(store, [shot("组5", "a.png", 0), shot("组5", "b.png", 0)]);
+  const tiktok = (await tagRoute(handler, "/ecom/api/product/tag", { name: "TikTok", group: "平台" })).json.tag;
+  const etsy = (await tagRoute(handler, "/ecom/api/product/tag", { name: "Etsy", group: "平台" })).json.tag;
+
+  // A stale client asking for a tag that no longer exists: nothing is written
+  // and it is told so, rather than looking like it worked.
+  const refused = await tagRoute(handler, "/ecom/api/product/tag/apply", { keys: ["组5|a.png"], add: ["ghost"] });
+  assert.equal(refused.status, 400);
+  assert.deepEqual(refused.json.tags, ["ghost"]);
+  assert.deepEqual((await call(handler, "GET", "/ecom/api/product/tags")).json.assigns, {});
+
+  // A card deleted between selecting and applying is a race, not an error: the
+  // rest of the selection still gets tagged and the skipped key is reported.
+  const done = await tagRoute(handler, "/ecom/api/product/tag/apply", {
+    keys: ["组5|a.png", "组5|b.png", "组5|gone.png"], add: [tiktok.id, etsy.id]
+  });
+  assert.equal(done.status, 200);
+  assert.equal(done.json.applied, 2);
+  assert.deepEqual(done.json.skipped, ["组5|gone.png"]);
+
+  const off = await tagRoute(handler, "/ecom/api/product/tag/apply", { keys: ["组5|a.png"], remove: [etsy.id] });
+  assert.equal(off.json.applied, 1);
+  const doc = (await call(handler, "GET", "/ecom/api/product/tags")).json;
+  assert.deepEqual(doc.assigns["组5|a.png"], [tiktok.id], "removing one tag leaves the others");
+  assert.deepEqual(doc.assigns["组5|b.png"], [tiktok.id, etsy.id]);
+});
+
+test("deleting a tag takes it off every card, and clearing empties the classification", async () => {
+  const { handler, store } = await freshHandler();
+  await seedOutputs(store, [shot("组5", "a.png", 0), shot("组5", "b.png", 0)]);
+  const keep = (await tagRoute(handler, "/ecom/api/product/tag", { name: "待上架" })).json.tag;
+  const drop = (await tagRoute(handler, "/ecom/api/product/tag", { name: "弃用" })).json.tag;
+  await tagRoute(handler, "/ecom/api/product/tag/apply", {
+    keys: ["组5|a.png", "组5|b.png"], add: [keep.id, drop.id]
+  });
+
+  await tagRoute(handler, "/ecom/api/delete", { kind: "tag", id: drop.id });
+  let doc = (await call(handler, "GET", "/ecom/api/product/tags")).json;
+  assert.deepEqual(doc.tags.map(function (t) { return t.id; }), [keep.id]);
+  assert.deepEqual(doc.assigns["组5|a.png"], [keep.id], "the deleted tag leaves no dangling id behind");
+  assert.deepEqual(doc.assigns["组5|b.png"], [keep.id]);
+
+  // Deleting a tag that is already gone is a no-op, like the other delete kinds.
+  const again = await tagRoute(handler, "/ecom/api/delete", { kind: "tag", id: drop.id });
+  assert.equal(again.status, 200);
+
+  await tagRoute(handler, "/ecom/api/clear", { kind: "tags" });
+  doc = (await call(handler, "GET", "/ecom/api/product/tags")).json;
+  assert.deepEqual(doc.tags, []);
+  assert.deepEqual(doc.assigns, {});
+});
+
+test("an assignment to a 款式 that left the shelf is kept until asked to prune", async () => {
+  const { handler, store } = await freshHandler();
+  await seedOutputs(store, [shot("组5", "a.png", 0), shot("组5", "stale.png", 0)]);
+  const tag = (await tagRoute(handler, "/ecom/api/product/tag", { name: "待上架" })).json.tag;
+  await tagRoute(handler, "/ecom/api/product/tag/apply", {
+    keys: ["组5|a.png", "组5|stale.png"], add: [tag.id]
+  });
+
+  // The stale 款式 loses its last 成片.
+  await seedOutputs(store, [shot("组5", "a.png", 0)]);
+
+  const before = (await call(handler, "GET", "/ecom/api/product/tags")).json;
+  assert.equal(Object.keys(before.assigns).length, 2, "reading tags never consults the product library");
+
+  const pruned = await tagRoute(handler, "/ecom/api/product/tag/prune", {});
+  assert.equal(pruned.status, 200);
+  assert.equal(pruned.json.removed, 1);
+  const after = (await call(handler, "GET", "/ecom/api/product/tags")).json;
+  assert.deepEqual(Object.keys(after.assigns), ["组5|a.png"]);
+});
+
+test("two tags cannot share a name, and a tag can be edited without tripping over its own", async () => {
+  const { handler } = await freshHandler();
+  const first = (await tagRoute(handler, "/ecom/api/product/tag", { name: "待上架", group: "上架状态" })).json.tag;
+
+  const clash = await tagRoute(handler, "/ecom/api/product/tag", { name: "待上架" });
+  assert.equal(clash.status, 409);
+
+  const recoloured = await tagRoute(handler, "/ecom/api/product/tag", { id: first.id, name: "待上架", color: 3 });
+  assert.equal(recoloured.status, 200);
+  assert.equal(recoloured.json.tag.color, 3);
+
+  const renamed = await tagRoute(handler, "/ecom/api/product/tag", { id: first.id, name: "已上架" });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.json.tag.name, "已上架");
+  assert.equal(renamed.json.tag.color, 3, "a rename keeps the colour");
+
+  const missing = await tagRoute(handler, "/ecom/api/product/tag", { id: "nope", name: "无此标签" });
+  assert.equal(missing.status, 404);
+
+  const nameless = await tagRoute(handler, "/ecom/api/product/tag", { name: "   " });
+  assert.equal(nameless.status, 400);
+});
+
+test("tags survive reopening the store, and a hand-edited file cannot make them unreadable", async () => {
+  const { handler, store, root } = await freshHandler();
+  await seedOutputs(store, [shot("组5", "a.png", 0)]);
+  const tag = (await tagRoute(handler, "/ecom/api/product/tag", { name: "待上架", group: "上架状态", color: 2 })).json.tag;
+  await tagRoute(handler, "/ecom/api/product/tag/apply", { keys: ["组5|a.png"], add: [tag.id] });
+
+  const reopened = createHandler(createStore(root), createLocalProvider());
+  const doc = (await call(reopened, "GET", "/ecom/api/product/tags")).json;
+  assert.equal(doc.tags.length, 1);
+  assert.equal(doc.tags[0].name, "待上架");
+  assert.equal(doc.tags[0].color, 2);
+  assert.deepEqual(doc.assigns["组5|a.png"], [tag.id]);
+
+  // Hand-edited the way a restored backup might be: the same id twice, a
+  // duplicate assignment, and an id with no tag behind it.
+  await writeFile(join(root, "product-tags.json"), JSON.stringify({
+    tags: [{ id: tag.id, name: "待上架" }, { id: tag.id, name: "重复的" }, { name: "没写 id" }],
+    assigns: { "组5|a.png": [tag.id, tag.id, "ghost"] }
+  }), "utf8");
+
+  const repaired = (await call(reopened, "GET", "/ecom/api/product/tags")).json;
+  assert.deepEqual(repaired.tags.map(function (t) { return t.name; }), ["待上架", "没写 id"]);
+  assert.ok(repaired.tags[1].id, "a tag with no id gets one instead of vanishing");
+  assert.deepEqual(repaired.assigns["组5|a.png"], [tag.id], "duplicates collapse and the dangling id is dropped");
+});
+

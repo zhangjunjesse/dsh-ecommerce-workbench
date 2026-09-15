@@ -1247,3 +1247,326 @@ test("tapping a shot in the waterfall opens its 商品 on that shot", () => {
   const counters = text.filter(function (line) { return /^第 \d+ \/ \d+ 张$/.test(line); });
   assert.deepEqual(counters, ["第 3 / 3 张"], "the modal must open on the tapped shot, not on the first one");
 });
+
+// ---------------------------------------------------------------------------
+// 成品库 tags — the shelf stops being read-only (docs/DECISION-0004-product-tags.md).
+//
+// The seed keys are written the way the host writes them (`<groupKey>|<composite>`),
+// which is what pins the shape: a client that keyed its cards differently would
+// render an empty tag row here and nothing else would notice.
+// ---------------------------------------------------------------------------
+
+/** Find every node carrying a given prop (the `data-ecom-*` hooks the shelf sets). */
+function findByProp(node, prop) {
+  const found = [];
+  (function walk(current) {
+    if (current === null || current === undefined || typeof current !== "object") return;
+    if (Array.isArray(current)) { current.forEach(walk); return; }
+    if (current.props && current.props[prop] !== undefined) found.push(current);
+    walk(current.children);
+  })(node);
+  return found;
+}
+
+/** Every card node on the feed. */
+function shelfCards(node) {
+  return findByProp(node, "className").filter(function (entry) { return entry.props.className === "ecom-card"; });
+}
+
+/** Buttons whose label contains `label` (a node's tag name is `node.type`, not a prop). */
+function buttonsLabelled(node, label) {
+  const found = [];
+  (function walk(current) {
+    if (current === null || current === undefined || typeof current !== "object") return;
+    if (Array.isArray(current)) { current.forEach(walk); return; }
+    if (current.type === "button" && collectText(current, []).join("").indexOf(label) !== -1) found.push(current);
+    walk(current.children);
+  })(node);
+  return found;
+}
+
+/** Whether any text node under `node` contains `needle`. */
+function textHas(node, needle) {
+  return collectText(node, []).some(function (line) { return line.indexOf(needle) !== -1; });
+}
+
+/** The `img` nodes inside a subtree, in render order. */
+function imagesIn(node) {
+  const found = [];
+  (function walk(current) {
+    if (current === null || current === undefined || typeof current !== "object") return;
+    if (Array.isArray(current)) { current.forEach(walk); return; }
+    if (current.type === "img") found.push(current);
+    walk(current.children);
+  })(node);
+  return found;
+}
+
+/** Three 款式 of one 商品: t1 and t2 are tagged, t3 is not. */
+const TAG_PRODUCTS = DEMO_PRODUCTS.concat([
+  { id: "p4", groupKey: "商品A", groupName: "商品A", file: "c-1.png", tshirtFile: "t3.png", sceneFile: "s4.png", sceneIndex: 0, createdAt: 0 }
+]);
+const TAG_DOC = {
+  tags: [
+    { id: "tg1", name: "待上架", group: "上架状态", color: 0 },
+    { id: "tg2", name: "TikTok", group: "平台", color: 1 }
+  ],
+  assigns: { "商品A|t1.png": ["tg1", "tg2"], "商品A|t2.png": ["tg1"] }
+};
+
+/** The shelf seeds every tag test needs. */
+function shelfPatched(extra) {
+  let patched = CLIENT_SOURCE
+    .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
+    .replace("var tshirtsState = React.useState([]);", "var tshirtsState = React.useState(__DEMO_SHELF_TSHIRTS__);")
+    .replace("var tshirtRecreationsState = React.useState([]);", "var tshirtRecreationsState = React.useState(__DEMO_SHELF_RECREATIONS__);")
+    .replace("var loadingState = React.useState(true);", "var loadingState = React.useState(false);")
+    .replace("var tagDocState = React.useState({ tags: [], assigns: {} });", "var tagDocState = React.useState(__DEMO_TAGS__);");
+  assert.match(patched, /useState\(__DEMO_TAGS__\)/, "the tag seed no longer applies — update it");
+  if (typeof extra === "function") patched = extra(patched);
+  return patched;
+}
+
+function shelfDemo(extra) {
+  return Object.assign({
+    __DEMO_PRODUCTS__: TAG_PRODUCTS,
+    __DEMO_SHELF_TSHIRTS__: DEMO_SHELF_TSHIRTS,
+    __DEMO_SHELF_RECREATIONS__: DEMO_SHELF_RECREATIONS,
+    __DEMO_TAGS__: TAG_DOC
+  }, extra || {});
+}
+
+test("the shelf shows the user's tags on the cards and offers them as filters", () => {
+  const loaded = loadClient(shelfPatched(), shelfDemo());
+  const tree = render(loaded.view({}), 0);
+
+  const bar = findByProp(tree, "data-ecom-tag-bar")[0];
+  assert.ok(bar, "the tag bar is not rendered — tags would be unreachable");
+  // Each chip carries the tag and how many 款式 in view hold it: 待上架 is on two
+  // cards, TikTok on one, and one 款式 has no tags at all.
+  assert.deepEqual(collectText(bar, []),
+    ["标签", "待上架", "2", "TikTok", "1", "未打标签 1", "管理标签", "选择"]);
+
+  const cards = shelfCards(tree);
+  assert.equal(cards.length, 3, "one card per 款式");
+  const first = collectText(cards[0], []).join("|");
+  assert.match(first, /待上架/, "the card must show its own tags");
+  assert.match(first, /TikTok/);
+  const second = collectText(cards[1], []).join("|");
+  assert.match(second, /待上架/);
+  assert.equal(/TikTok/.test(second), false, "t2 carries 待上架 only");
+  assert.equal(/待上架|TikTok/.test(collectText(cards[2], []).join("|")), false, "t3 carries no tags");
+});
+
+test("the tag key is defined once on each half, and the client uses that one definition", () => {
+  // A second spelling of the key on the client is how the two halves drift apart,
+  // and the symptom is tags that never appear on anything.
+  assert.equal(CLIENT_SOURCE.split('groupKey + "|" + p.tshirtFile').length - 1, 0,
+    "the card key must come from cardKeyOf, not from a second literal");
+  assert.equal(CLIENT_SOURCE.split("function cardKeyOf(groupKey, styleFile)").length - 1, 1,
+    "there must be exactly one definition of the tag key");
+});
+
+test("picking a tag narrows the feed, and 未打标签 finds what has not been looked at", () => {
+  const filtered = shelfPatched(function (source) {
+    const next = source.replace("var tagFilterState = React.useState([]);", "var tagFilterState = React.useState(__DEMO_TAG_FILTER__);");
+    assert.match(next, /useState\(__DEMO_TAG_FILTER__\)/, "the tag-filter seed no longer applies");
+    return next;
+  });
+  const tree = render(loadClient(filtered, shelfDemo({ __DEMO_TAG_FILTER__: ["tg2"] })).view({}), 0);
+  const cards = shelfCards(tree);
+  assert.equal(cards.length, 1, "only the 款式 carrying TikTok survives the filter");
+  assert.match(collectText(cards[0], []).join("|"), /款式 #1/, "and it is the one that carries it");
+  assert.ok(collectText(tree, []).some(function (line) { return line.indexOf("筛选出 1") !== -1; }),
+    "the count must say the feed is filtered, not just show fewer cards");
+
+  const untagged = shelfPatched(function (source) {
+    const next = source.replace("var untaggedState = React.useState(false);", "var untaggedState = React.useState(__DEMO_UNTAGGED__);");
+    assert.match(next, /useState\(__DEMO_UNTAGGED__\)/, "the 未打标签 seed no longer applies");
+    return next;
+  });
+  const untaggedTree = render(loadClient(untagged, shelfDemo({ __DEMO_UNTAGGED__: true })).view({}), 0);
+  const left = shelfCards(untaggedTree);
+  assert.equal(left.length, 1, "未打标签 must leave only the cards with no tags");
+  assert.match(collectText(left[0], []).join("|"), /款式 #3/);
+});
+
+test("选择模式 turns the cards into a selection, and the bar names the whole filtered set", () => {
+  const patched = shelfPatched(function (source) {
+    const next = source
+      .replace("var selectModeState = React.useState(false);", "var selectModeState = React.useState(__DEMO_SELECT_MODE__);")
+      .replace("var selectionState = React.useState({});", "var selectionState = React.useState(__DEMO_SELECTION__);");
+    assert.match(next, /useState\(__DEMO_SELECT_MODE__\)/, "the selection seeds no longer apply");
+    return next;
+  });
+  const loaded = loadClient(patched, shelfDemo({
+    __DEMO_SELECT_MODE__: true,
+    __DEMO_SELECTION__: { "商品A|t1.png": true, "商品A|t2.png": true }
+  }));
+  const tree = render(loaded.view({}), 0);
+
+  const bar = findByProp(tree, "data-ecom-select-bar")[0];
+  assert.ok(bar, "选择模式 must render its own bar — otherwise there is no way to act on a selection");
+  const barText = collectText(bar, []).join("|");
+  assert.match(barText, /已选 2 个款式/, "the bar must say what is selected");
+  // The whole filtered set, not the page currently painted: the count is the feed's.
+  assert.match(barText, /全选当前筛选结果（3）/, "全选 must name the filtered set it will select");
+  assert.match(barText, /打标签/);
+
+  // Tapping a card selects it instead of opening the 商品 — the one interaction
+  // this changes, and only while selecting. The third card (t3) is the one with no
+  // tags, so it starts unselected.
+  const cards = shelfCards(tree);
+  assert.equal(cards.length, 3);
+  imagesIn(cards[2])[0].props.onClick({ clientX: 0, clientY: 0 });
+  // The selection is a functional update (it must not lose a click that lands
+  // while another is still settling), so the recorded setter takes the previous
+  // selection and returns the next one.
+  const updaters = loaded.stateCalls.filter(function (value) { return typeof value === "function"; });
+  assert.equal(updaters.length, 1, "tapping a card must move the selection exactly once");
+  assert.deepEqual(updaters[0]({ "商品A|t1.png": true }),
+    { "商品A|t1.png": true, "商品A|t3.png": true },
+    "the tapped card joins the selection under its tag key, and the rest of it survives");
+  assert.equal(findByProp(tree, "data-ecom-tag-picker").length, 0, "the picker opens only when asked");
+});
+
+test("the batch dialog applies one tag to the whole selection in ONE request", async () => {
+  const patched = shelfPatched(function (source) {
+    const next = source
+      .replace("var selectModeState = React.useState(false);", "var selectModeState = React.useState(__DEMO_SELECT_MODE__);")
+      .replace("var selectionState = React.useState({});", "var selectionState = React.useState(__DEMO_SELECTION__);")
+      .replace("var pickerState = React.useState(false);", "var pickerState = React.useState(__DEMO_PICKER__);");
+    assert.match(next, /useState\(__DEMO_PICKER__\)/, "the picker seed no longer applies");
+    return next;
+  });
+  const calls = [];
+  const loaded = loadClient(patched, shelfDemo({
+    __DEMO_SELECT_MODE__: true,
+    // t1 and t2 both carry 待上架, only t1 carries TikTok, and Etsy is on neither —
+    // so all three states a batch can be in are on screen at once.
+    __DEMO_SELECTION__: { "商品A|t1.png": true, "商品A|t2.png": true },
+    __DEMO_PICKER__: true,
+    __DEMO_TAGS__: {
+      tags: TAG_DOC.tags.concat([{ id: "tg3", name: "Etsy", group: "平台", color: 2 }]),
+      assigns: TAG_DOC.assigns
+    }
+  }), {
+    fetch: function (url, init) {
+      calls.push({ url: String(url), method: init && init.method, body: init && init.body ? JSON.parse(init.body) : null });
+      return Promise.resolve({ json: function () { return Promise.resolve({ ok: true }); } });
+    }
+  });
+  const tree = render(loaded.view({}), 0);
+
+  const picker = findByProp(tree, "data-ecom-tag-picker")[0];
+  assert.ok(picker, "the batch dialog is not rendered");
+  assert.ok(textHas(picker, "已选 2 个款式"), "the dialog must say what it is about to change");
+  // Per-tag counts for the selection: 待上架 is on both, TikTok on one, Etsy on none.
+  assert.ok(textHas(picker, "2/2 已有"), "a tag held by the whole selection must say so");
+  assert.ok(textHas(picker, "1/2 已有"), "and one held by part of it must say how many");
+  assert.ok(textHas(picker, "未使用"), "and one held by none must say so too");
+
+  // Both buttons exist for every tag: "加上" and "移除" are separate because a
+  // tri-state checkbox cannot say which way a click will go.
+  const addButtons = buttonsLabelled(picker, "加上");
+  const removeButtons = buttonsLabelled(picker, "移除");
+  assert.equal(addButtons.length, 3, "one 加上 per tag");
+  assert.equal(removeButtons.length, 3, "one 移除 per tag");
+
+  addButtons[0].props.onClick();
+  await new Promise(function (resolve) { setTimeout(resolve, 0); });
+
+  const posts = calls.filter(function (entry) { return entry.url.indexOf("/product/tag/apply") !== -1; });
+  assert.equal(posts.length, 1, "the whole selection must be one request, not one per card");
+  assert.equal(posts[0].method, "POST");
+  assert.deepEqual(posts[0].body.keys, ["商品A|t1.png", "商品A|t2.png"], "by the host's own key shape");
+  assert.deepEqual(posts[0].body.add, ["tg1"]);
+  assert.deepEqual(posts[0].body.remove, []);
+});
+
+test("管理标签 creates, recolours and deletes by id, and reports 失效记录 instead of hiding them", async () => {
+  const patched = shelfPatched(function (source) {
+    const next = source.replace("var managerState = React.useState(false);", "var managerState = React.useState(__DEMO_MANAGER__);");
+    assert.match(next, /useState\(__DEMO_MANAGER__\)/, "the manager seed no longer applies");
+    return next;
+  });
+  const calls = [];
+  const loaded = loadClient(patched, shelfDemo({
+    __DEMO_MANAGER__: true,
+    // One assignment names a 款式 that is not on the shelf: the store never sweeps
+    // these on read, so the manager is where they become visible.
+    __DEMO_TAGS__: Object.assign({}, TAG_DOC, { assigns: Object.assign({}, TAG_DOC.assigns, { "商品A|gone.png": ["tg1"] }) })
+  }), {
+    fetch: function (url, init) {
+      calls.push({ url: String(url), method: init && init.method, body: init && init.body ? JSON.parse(init.body) : null });
+      return Promise.resolve({ json: function () { return Promise.resolve({ ok: true }); } });
+    }
+  });
+  const tree = render(loaded.view({}), 0);
+
+  const manager = findByProp(tree, "data-ecom-tag-manager")[0];
+  assert.ok(manager, "the manager dialog is not rendered");
+  assert.ok(textHas(manager, "待上架") && textHas(manager, "TikTok"), "every tag must be listed");
+  assert.ok(textHas(manager, "2 个款式"), "a tag must say how many cards carry it before it is deleted");
+  assert.ok(textHas(manager, "1 条失效记录"),
+    "assignments to a 款式 that is gone must be reported, not silently kept or silently dropped");
+
+  // New tags are created through the same route that renames them.
+  buttonsLabelled(manager, "新建")[0].props.onClick();
+  await new Promise(function (resolve) { setTimeout(resolve, 0); });
+  assert.equal(calls.length, 0, "an empty name must not create a tag");
+
+  // Deleting a tag goes through the generic delete route with its own kind, which
+  // is what takes it off every card in the same write.
+  buttonsLabelled(manager, "删除")[0].props.onClick();
+  await new Promise(function (resolve) { setTimeout(resolve, 0); });
+  const deletes = calls.filter(function (entry) { return entry.url.indexOf("/delete") !== -1; });
+  assert.equal(deletes.length, 1);
+  assert.deepEqual(deletes[0].body, { kind: "tag", id: "tg1" });
+
+  // …and the stale ones are cleared only when asked.
+  buttonsLabelled(manager, "清理")[0].props.onClick();
+  await new Promise(function (resolve) { setTimeout(resolve, 0); });
+  const prunes = calls.filter(function (entry) { return entry.url.indexOf("/product/tag/prune") !== -1; });
+  assert.equal(prunes.length, 1);
+});
+
+test("the product page tags the 款式 it is showing, and can push them onto the whole 商品", async () => {
+  const patched = CLIENT_SOURCE
+    .replace("var productsState = React.useState([]);", "var productsState = React.useState(__DEMO_PRODUCTS__);")
+    .replace("var loadingState = React.useState(true);", "var loadingState = React.useState(false);")
+    .replace("var tagDocState = React.useState({ tags: [], assigns: {} });", "var tagDocState = React.useState(__DEMO_TAGS__);")
+    .replace("var openState = React.useState(null);", "var openState = React.useState(__DEMO_OPEN__);");
+  assert.match(patched, /useState\(__DEMO_OPEN__\)/, "the open-商品 seed no longer applies — update it");
+
+  const calls = [];
+  const loaded = loadClient(patched, {
+    __DEMO_PRODUCTS__: TAG_PRODUCTS,
+    __DEMO_TAGS__: TAG_DOC,
+    // Opened on 款式 #2 (t2.png), which carries 待上架 only.
+    __DEMO_OPEN__: { groupKey: "商品A", styleFile: "t2.png", shotId: null }
+  }, {
+    fetch: function (url, init) {
+      calls.push({ url: String(url), method: init && init.method, body: init && init.body ? JSON.parse(init.body) : null });
+      return Promise.resolve({ json: function () { return Promise.resolve({ ok: true }); } });
+    }
+  });
+  const tree = render(loaded.view({}), 0);
+
+  const block = findByProp(tree, "data-ecom-modal-tags")[0];
+  assert.ok(block, "the product page must carry the 款式's tags — that is where a SKU is judged");
+  const blockText = collectText(block, []);
+  assert.ok(blockText.indexOf("待上架") !== -1, "the shown 款式's own tag must be there");
+  assert.equal(blockText.indexOf("TikTok"), -1, "and not another 款式's");
+
+  // 应用到本商品全部款式 is add-only: it must not silently strip the tags the other
+  // 款式 already carry, so only `add` is sent.
+  buttonsLabelled(block, "应用到本商品全部款式")[0].props.onClick();
+  await new Promise(function (resolve) { setTimeout(resolve, 0); });
+  const posts = calls.filter(function (entry) { return entry.url.indexOf("/product/tag/apply") !== -1; });
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].body.keys.slice().sort(), ["商品A|t1.png", "商品A|t2.png", "商品A|t3.png"]);
+  assert.deepEqual(posts[0].body.add, ["tg1"]);
+  assert.deepEqual(posts[0].body.remove, [], "applying to a whole 商品 must never remove");
+});
+
